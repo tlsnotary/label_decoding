@@ -10,13 +10,8 @@ def padded_hex(s):
     else:
         return '0x{0:0{1}x}'.format(s,l-1)
 
-# This script will generate the circuit and inputs
-# Install Noir: https://noir-lang.github.io/book/getting_started/install.html
-# then run e.g. to process 10 Field elements of plaintext ~320bytes
-# python3 script.py 10 
-# nargo prove proof1.proof
-# nargo verify proof1.proof
- 
+# This script will generate the circom circuit and inputs
+
 if __name__ == '__main__':
     if len(sys.argv) != 2:
         print('Expected 1 argument: amount of plaintext to process (in Field elements)')
