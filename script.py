@@ -102,6 +102,18 @@ if __name__ == '__main__':
             return out
         else:
             out += hash(2, 16, 16, False)
+        if count+1 <= 64:
+            out += hash(3, 16, count+1-48, True)
+            out += '    prover_hash <== hash_3.out;\n'
+            return out
+        else:
+            out += hash(3, 16, 16, False)
+        if count+1 <= 80:
+            out += hash(4, 16, count+1-64, True)
+            out += '    prover_hash <== hash_3.out;\n'
+            return out
+        else:
+            out += hash(4, 16, 16, False)
          
 
     main += '\n'

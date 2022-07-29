@@ -9,12 +9,9 @@ python3 script.py 10
 # to decode inside the snark. (For tau^14 max is 21)
 # if you need more than 21, you'll need to download another ptau file from 
 # https://github.com/iden3/snarkjs#7-prepare-phase-2
-circom circuit.circom --r1cs --wasm --sym
-snarkjs r1cs export json circuit.r1cs circuit.r1cs.json
-cd circuit_js/ && node generate_witness.js circuit.wasm ../input.json ../witness.wtns && cd .. 
+circom circuit.circom --r1cs --wasm
 snarkjs groth16 setup circuit.r1cs powersOfTau28_hez_final_14.ptau circuit_0000.zkey
-snarkjs zkey contribute circuit_0000.zkey circuit_0001.zkey --name="1st" -v -e="kkk" # 10 sec one-time
-snarkjs zkey contribute circuit_0001.zkey circuit_final.zkey --name="2nd" -v -e="Another"
+snarkjs zkey contribute circuit_0000.zkey circuit_final.zkey -v -e="Notary's entropy"
 snarkjs zkey export verificationkey circuit_final.zkey verification_key.json
-snarkjs groth16 prove circuit_final.zkey witness.wtns proof.json public.json
+snarkjs groth16 fullprove input.json circuit_js/circuit.wasm circuit_final.zkey proof.json public.json
 snarkjs groth16 verify verification_key.json public.json proof.json
