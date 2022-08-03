@@ -38,7 +38,8 @@ mod tests {
         // we have 16 FE * 253 bits each == 506 bytes
         let mut plaintext = [0u8; 512];
         rng.fill(&mut plaintext);
-        let plaintext = &plaintext[0..506];
+        let plaintext = &plaintext[0..474];
+        // 3792 bits
         // bn254 prime 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
         // in decimal 21888242871839275222246405745257275088548364400416034343698204186575808495617
 
