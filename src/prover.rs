@@ -1,7 +1,13 @@
+use json::{object, stringify, stringify_pretty};
 /// implementing the "label sum" protocol
 ///
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
 use rand::{thread_rng, Rng};
+use std::fs;
+use std::process::Command;
+use std::str;
+
+use super::BN254_PRIME;
 
 // implementation of the Prover in the "label sum" protocol (aka the User).
 pub struct LsumProver {
@@ -9,7 +15,7 @@ pub struct LsumProver {
     // the prime of the field in which Poseidon hash will be computed.
     field_prime: BigUint,
     // how many bits to pack into one field element
-    bits_to_pack: Option<usize>,
+    useful_bits: Option<usize>,
     // We will compute a separate Poseidon hash on each chunk of the plaintext.
     // Each chunk contains 16 field elements.
     chunks: Option<Vec<[BigUint; 16]>>,
@@ -30,18 +36,20 @@ impl LsumProver {
         Self {
             plaintext,
             field_prime,
-            bits_to_pack: None,
+            useful_bits: None,
             chunks: None,
             salts: None,
         }
     }
 
-    pub fn setup(&mut self) {
-        let bits_to_pack = compute_full_bits(self.field_prime.clone());
-        self.bits_to_pack = Some(bits_to_pack);
+    // Return hash digests which is Prover's commitment to the plaintext
+    pub fn setup(&mut self) -> Vec<BigUint> {
+        let useful_bits = compute_useful_bits(self.field_prime.clone());
+        self.useful_bits = Some(useful_bits);
         let (chunks, salts) = self.plaintext_to_chunks();
-        self.chunks = Some(chunks);
+        self.chunks = Some(chunks.clone());
         self.salts = Some(salts);
+        self.hash_chunks(chunks)
     }
 
     // create chunks of plaintext where each chunk consists of 16 field elements.
@@ -49,9 +57,11 @@ impl LsumProver {
     // If there is not enough plaintext to fill the whole chunk, we fill the gap
     // with zero bits.
     fn plaintext_to_chunks(&mut self) -> (Vec<[BigUint; 16]>, Vec<BigUint>) {
-        let bits_to_pack = self.bits_to_pack.unwrap();
+        let useful_bits = self.useful_bits.unwrap();
         // the size of a chunk of plaintext not counting the salt
-        let chunk_size = bits_to_pack * 16 - 128;
+        // let chunk_size = useful_bits * 16 - 128;
+        // TODO dont use the salt for now
+        let chunk_size = useful_bits * 16;
         // plaintext converted into bits
         let mut bits = u8vec_to_boolvec(&self.plaintext);
         // chunk count (rounded up)
@@ -83,42 +93,101 @@ impl LsumProver {
                 BigUint::default(),
                 BigUint::default(),
             ];
-            for j in 0..15 {
+            // TODO dont use salt for now, to make debugging easier, later change this to
+            // for j in 0..15 { and uncomment the lines below //offset and //chunk[15]
+            for j in 0..16 {
                 // convert bits into field element
                 chunk[j] =
-                    BigUint::from_bytes_be(&boolvec_to_u8vec(&bits[offset..offset + bits_to_pack]));
-                offset += bits_to_pack;
+                    BigUint::from_bytes_be(&boolvec_to_u8vec(&bits[offset..offset + useful_bits]));
+                offset += useful_bits;
             }
             // last field element's last 128 bits are for the salt
-            let mut rng = thread_rng();
-            let salt: [u8; 16] = rng.gen();
-            let salt = u8vec_to_boolvec(&salt);
+            // let mut rng = thread_rng();
+            // let salt: [u8; 16] = rng.gen();
+            // let salt = u8vec_to_boolvec(&salt);
 
-            let mut last_fe = vec![false; bits_to_pack];
-            last_fe[0..bits_to_pack - 128]
-                .copy_from_slice(&bits[offset..offset + (bits_to_pack - 128)]);
-            offset += bits_to_pack - 128;
-            last_fe[bits_to_pack - 128..].copy_from_slice(&salt);
-            chunk[15] = BigUint::from_bytes_be(&boolvec_to_u8vec(&last_fe));
+            // let mut last_fe = vec![false; useful_bits];
+            // last_fe[0..useful_bits - 128]
+            //     .copy_from_slice(&bits[offset..offset + (useful_bits - 128)]);
+            //offset += useful_bits - 128;
+            // last_fe[useful_bits - 128..].copy_from_slice(&salt);
+            //chunk[15] = BigUint::from_bytes_be(&boolvec_to_u8vec(&last_fe));
 
-            let salt = BigUint::from_bytes_be(&boolvec_to_u8vec(&salt));
-            salts.push(salt);
+            // let salt = BigUint::from_bytes_be(&boolvec_to_u8vec(&salt));
+            // salts.push(salt);
             chunks.push(chunk);
         }
         (chunks, salts)
+    }
+
+    // hashes each chunk with Poseidon and returns digests for each chunk
+    fn hash_chunks(&mut self, chunks: Vec<[BigUint; 16]>) -> Vec<BigUint> {
+        return chunks
+            .iter()
+            .map(|chunk| self.poseidon(chunk.to_vec()))
+            .collect();
+    }
+
+    // hash the inputs with Poseidon with circomlibjs
+    pub fn poseidon(&mut self, inputs: Vec<BigUint>) -> BigUint {
+        // escape every field elements
+        let strchunks: Vec<String> = inputs
+            .iter()
+            .map(|fe| String::from("\"") + &fe.to_string() + &String::from("\""))
+            .collect();
+        // convert to JSON array
+        let json = String::from("[") + &strchunks.join(", ") + &String::from("]");
+        println!("strchunks {:?}", json);
+
+        let output = Command::new("node")
+            .args(["poseidon.mjs", &json])
+            .output()
+            .unwrap();
+        // drop the trailing new line
+        let output = &output.stdout[0..output.stdout.len() - 1];
+        let s = String::from_utf8(output.to_vec()).unwrap();
+        let bi = s.parse::<BigUint>().unwrap();
+        println!("poseidon output {:?}", bi);
+        bi
+    }
+
+    pub fn create_zk_proof(&mut self, zero_sum: BigUint, deltas: Vec<BigUint>, label_sum: BigUint) {
+        // write inputs into input.json
+        let pt_str: Vec<String> = self.chunks.as_ref().unwrap()[0]
+            .to_vec()
+            .iter()
+            .map(|bigint| bigint.to_string())
+            .collect();
+        // There are as many deltas as there are bits in the plaintext
+        let delta_str: Vec<String> = deltas[0..self.useful_bits.unwrap() * 16]
+            .iter()
+            .map(|bigint| bigint.to_string())
+            .collect();
+        let mut data = object! {
+            sum_of_labels: label_sum.to_string(),
+            sum_of_zero_labels: zero_sum.to_string(),
+            plaintext: pt_str,
+            delta: delta_str
+        };
+        let s = stringify_pretty(data, 4);
+        fs::write("input2.json", s).expect("Unable to write file");
     }
 }
 
 /// Computes how many bits of plaintext we will pack into one field element.
 /// Essentially, this is field_prime bit length minus 1.
-fn compute_full_bits(field_prime: BigUint) -> usize {
+fn compute_useful_bits(field_prime: BigUint) -> usize {
     (field_prime.bits() - 1) as usize
 }
 
 #[test]
 fn test_compute_full_bits() {
-    assert_eq!(compute_full_bits(BigUint::from_u16(13).unwrap()), 3);
-    assert_eq!(compute_full_bits(BigUint::from_u16(255).unwrap()), 7);
+    assert_eq!(compute_useful_bits(BigUint::from_u16(13).unwrap()), 3);
+    assert_eq!(compute_useful_bits(BigUint::from_u16(255).unwrap()), 7);
+    assert_eq!(
+        compute_useful_bits(String::from(BN254_PRIME,).parse::<BigUint>().unwrap()),
+        253
+    );
 }
 
 #[inline]
@@ -200,8 +269,31 @@ mod tests {
         // salt has been set, i.e. it is not equal 0
         assert!(!prover.chunks.clone().unwrap()[1][15].eq(&BigUint::from_u8(0).unwrap()));
     }
-}
 
-fn main() {
-    println!("Hello, world!");
+    #[test]
+    fn test_hash_chunks() {
+        // 137-bit prime. Plaintext will be packed into 136 bits (17 bytes).
+        let mut prime = vec![false; 137];
+        prime[0] = true;
+        let prime = boolvec_to_u8vec(&prime);
+        let prime = BigUint::from_bytes_be(&prime);
+        // plaintext will spawn 2 chunks
+        let mut plaintext = vec![0u8; 17 * 15 + 1 + 17 * 5];
+        let mut prover = LsumProver::new(plaintext, prime);
+        //LsumProver::hash_chunks(&mut prover);
+    }
+
+    #[test]
+    fn test_json() {
+        let mut prime = vec![false; 137];
+        prime[0] = true;
+        let prime = boolvec_to_u8vec(&prime);
+        let prime = BigUint::from_bytes_be(&prime);
+        let v = vec![BigUint::from_u8(0).unwrap(), BigUint::from_u8(1).unwrap()];
+        let v_str: Vec<String> = v.iter().map(|bigint| bigint.to_string()).collect();
+        let mut data = object! {
+            foo:v_str
+        };
+        println!("{:?}", data.dump());
+    }
 }
