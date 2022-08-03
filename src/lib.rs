@@ -31,12 +31,14 @@ mod tests {
     }
 
     #[test]
-    fn test() {
+    fn e2e_test() {
         let mut rng = thread_rng();
 
-        // random 2KB plaintext
-        let mut plaintext = [0u8; 1024];
+        // random 506 byte plaintext
+        // we have 16 FE * 253 bits each == 506 bytes
+        let mut plaintext = [0u8; 512];
         rng.fill(&mut plaintext);
+        let plaintext = &plaintext[0..506];
         // bn254 prime 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
         // in decimal 21888242871839275222246405745257275088548364400416034343698204186575808495617
 
@@ -64,10 +66,10 @@ mod tests {
 
         let prime = String::from(BN254_PRIME).parse::<BigUint>().unwrap();
         let mut prover = LsumProver::new(plaintext.to_vec(), prime);
-        let plaintext_comm = prover.setup();
+        let plaintext_hash = prover.setup();
         // Commitment to the plaintext is sent to the Notary
         let mut verifier = LsumVerifier::new();
-        verifier.receive_pt_hashes(plaintext_comm);
+        verifier.receive_pt_hashes(plaintext_hash);
         // Verifier sends back encrypted arithm. labels. We skip this step
         // and simulate Prover's deriving his arithm labels:
         let prover_labels = choose(&arithm_labels, &u8vec_to_boolvec(&plaintext));

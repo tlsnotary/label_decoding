@@ -19,6 +19,8 @@ pub struct LsumProver {
     // We will compute a separate Poseidon hash on each chunk of the plaintext.
     // Each chunk contains 16 field elements.
     chunks: Option<Vec<[BigUint; 16]>>,
+    // Poseidon hashes of each chunk
+    hashes_of_chunks: Option<Vec<BigUint>>,
     // each chunk's last 128 bits are used for the salt. This is important for
     // security b/c w/o the salt, hashes of plaintext with low entropy could be
     // brute-forced.
@@ -39,6 +41,7 @@ impl LsumProver {
             useful_bits: None,
             chunks: None,
             salts: None,
+            hashes_of_chunks: None,
         }
     }
 
@@ -49,7 +52,8 @@ impl LsumProver {
         let (chunks, salts) = self.plaintext_to_chunks();
         self.chunks = Some(chunks.clone());
         self.salts = Some(salts);
-        self.hash_chunks(chunks)
+        self.hashes_of_chunks = Some(self.hash_chunks(chunks));
+        self.hashes_of_chunks.as_ref().unwrap().to_vec()
     }
 
     // create chunks of plaintext where each chunk consists of 16 field elements.
@@ -128,16 +132,16 @@ impl LsumProver {
             .collect();
     }
 
-    // hash the inputs with Poseidon with circomlibjs
+    // hash the inputs with circomlibjs's Poseidon
     pub fn poseidon(&mut self, inputs: Vec<BigUint>) -> BigUint {
-        // escape every field elements
+        // convert field elements into escaped strings
         let strchunks: Vec<String> = inputs
             .iter()
             .map(|fe| String::from("\"") + &fe.to_string() + &String::from("\""))
             .collect();
         // convert to JSON array
         let json = String::from("[") + &strchunks.join(", ") + &String::from("]");
-        println!("strchunks {:?}", json);
+        println!("json {:?}", json);
 
         let output = Command::new("node")
             .args(["poseidon.mjs", &json])
@@ -152,25 +156,36 @@ impl LsumProver {
     }
 
     pub fn create_zk_proof(&mut self, zero_sum: BigUint, deltas: Vec<BigUint>, label_sum: BigUint) {
+        // hash label_sum
+        let label_sum_hash = self.poseidon(vec![label_sum.clone()]);
+
         // write inputs into input.json
         let pt_str: Vec<String> = self.chunks.as_ref().unwrap()[0]
             .to_vec()
             .iter()
             .map(|bigint| bigint.to_string())
             .collect();
+        // For now dealing with one chunk only
+        let deltas_ = &deltas[0..self.useful_bits.unwrap() * 16];
+        let mut deltas_chunk: Vec<Vec<BigUint>> = Vec::with_capacity(16);
+        for i in 0..16 {
+            deltas_chunk.push(deltas[i * 253..(i + 1) * 253].to_vec());
+        }
+
         // There are as many deltas as there are bits in the plaintext
-        let delta_str: Vec<String> = deltas[0..self.useful_bits.unwrap() * 16]
+        let delta_str: Vec<Vec<String>> = deltas_chunk
             .iter()
-            .map(|bigint| bigint.to_string())
+            .map(|v| v.iter().map(|b| b.to_string()).collect())
             .collect();
         let mut data = object! {
-            sum_of_labels: label_sum.to_string(),
+            label_sum_hash: label_sum_hash.to_string(),
+            plaintext_hash: self.hashes_of_chunks.as_ref().unwrap()[0].to_string(),
             sum_of_zero_labels: zero_sum.to_string(),
             plaintext: pt_str,
             delta: delta_str
         };
         let s = stringify_pretty(data, 4);
-        fs::write("input2.json", s).expect("Unable to write file");
+        fs::write("input.json", s).expect("Unable to write file");
     }
 }
 
