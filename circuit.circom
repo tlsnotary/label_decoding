@@ -3,48 +3,52 @@ include "./poseidon.circom";
 include "./utils.circom";
 
 template Main() {
-    var fe_count = 10;
-    // the other 130 bits of the last field element contain
-    // the salt
-    var last_fe_bits = 123;
+    // Poseidon hash width (how many field elements to hash)
+    var w = 16;
+    // The amount of last field element's high bits to use for
+    // the plaintext. The rest of it will be used for the salt.
+    var last_fe_bits = 125; 
+
     signal input plaintext_hash;
     signal input label_sum_hash;
-    signal input plaintext[fe_count];
-    signal input delta[fe_count-1][253];
+    signal input plaintext[w];
+    signal input delta[w-1][253];
     signal input delta_last[last_fe_bits];
     signal input sum_of_zero_labels;
-    signal sums[fe_count];
+    signal sums[w];
 
-    component hash = Poseidon(fe_count);
-    for (var i = 0; i<fe_count; i++) {
+    component hash = Poseidon(w);
+    for (var i = 0; i<w; i++) {
        hash.inputs[i] <== plaintext[i];
     }
+    plaintext_hash === hash.out;
 
-    // TODO to pass this assert we'd have to
-    // use actual values instead of random ones, so commenting out for now
-    // plaintext_hash === hash.out;
-
-    component ip[fe_count-1];
-    for (var i = 0; i<fe_count-1; i++) {
+    // the last element of sum_of_deltas will contain the accumulated sum total
+    signal sum_of_deltas[w+1];
+    sum_of_deltas[0] <== 0; 
+    
+    // inner products of (deltas * plaintext bits) go here
+    component ip[w-1];
+    for (var i = 0; i<w-1; i++) {
        ip[i] = InnerProd(253);
        ip[i].plaintext <== plaintext[i];
        for (var j=0; j<253; j++) {
            ip[i].deltas[j] <== delta[i][j];
        }
-       sums[i] <== ip[i].out;
+       sum_of_deltas[i+1] <== sum_of_deltas[i] + ip[i].out;
     }
+    // The last field element contains the salt, we make sure *not* to 
+    // include the salt in the inner product. 
     component ip_last = InnerProd(last_fe_bits);
-    ip_last.plaintext <== plaintext[fe_count-1];
+    ip_last.plaintext <== plaintext[w-1];
     for (var j=0; j<last_fe_bits; j++) {
         ip_last.deltas[j] <== delta_last[j];
     }
-    sums[fe_count-1] <== ip_last.out;
 
-    signal sum_of_deltas <== sums[0] + sums[1] + sums[2] + sums[3] + sums[4] + sums[5] + sums[6] + sums[7] + sums[8] + sums[9];
-    // TODO to pass this assert we'd have to
-    // use actual values instead of random ones, so commenting out for now
+    sum_of_deltas[w] <==  sum_of_deltas[w-1] + ip_last.out;
+
     component ls_hash = Poseidon(1);
-    ls_hash.inputs[0] <== sum_of_zero_labels + sum_of_deltas;
-    //label_sum_hash === ls_hash.out;
+    ls_hash.inputs[0] <== sum_of_zero_labels + sum_of_deltas[w];
+    label_sum_hash === ls_hash.out;
 }
 component main {public [plaintext_hash, label_sum_hash, delta, delta_last, sum_of_zero_labels]} = Main();

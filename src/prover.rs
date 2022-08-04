@@ -18,7 +18,7 @@ pub struct LsumProver {
     useful_bits: Option<usize>,
     // We will compute a separate Poseidon hash on each chunk of the plaintext.
     // Each chunk contains 16 field elements.
-    chunks: Option<Vec<[BigUint; 15]>>,
+    chunks: Option<Vec<[BigUint; 16]>>,
     // Poseidon hashes of each chunk
     hashes_of_chunks: Option<Vec<BigUint>>,
     // each chunk's last 128 bits are used for the salt. This is important for
@@ -60,22 +60,19 @@ impl LsumProver {
     // The last element's last 128 bits are reserved for the salt of the hash.
     // If there is not enough plaintext to fill the whole chunk, we fill the gap
     // with zero bits.
-    fn plaintext_to_chunks(&mut self) -> (Vec<[BigUint; 15]>, Vec<BigUint>) {
+    fn plaintext_to_chunks(&mut self) -> (Vec<[BigUint; 16]>, Vec<BigUint>) {
         let useful_bits = self.useful_bits.unwrap();
         // the size of a chunk of plaintext not counting the salt
-        // let chunk_size = useful_bits * 16 - 128;
-        // TODO dont use the salt for now
-        // TODO we hard code the chunk size to  = 3792
-        // to be a multiple of 8
-        // let chunk_size = useful_bits * 16;
-        let chunk_size = 3792;
+        let chunk_size = useful_bits * 16 - 128;
+
+        //let chunk_size = useful_bits * 16;
         // plaintext converted into bits
         let mut bits = u8vec_to_boolvec(&self.plaintext);
         // chunk count (rounded up)
         let chunk_count = (bits.len() + (chunk_size - 1)) / chunk_size;
         // extend bits with zeroes to fill the chunk
         bits.extend(vec![false; chunk_count * chunk_size - bits.len()]);
-        let mut chunks: Vec<[BigUint; 15]> = Vec::with_capacity(chunk_count);
+        let mut chunks: Vec<[BigUint; 16]> = Vec::with_capacity(chunk_count);
         let mut salts: Vec<BigUint> = Vec::with_capacity(chunk_count);
         // current offset within bits
         let mut offset: usize = 0;
@@ -98,42 +95,38 @@ impl LsumProver {
                 BigUint::default(),
                 BigUint::default(),
                 BigUint::default(),
-                //BigUint::default(),
+                BigUint::default(),
             ];
             // TODO dont use salt for now, to make debugging easier, later change this to
             // for j in 0..15 { and uncomment the lines below //offset and //chunk[15]
-            for j in 0..14 {
+            for j in 0..15 {
                 // convert bits into field element
                 chunk[j] =
                     BigUint::from_bytes_be(&boolvec_to_u8vec(&bits[offset..offset + useful_bits]));
                 offset += useful_bits;
             }
-            // convert bits into field element
-            chunk[14] =
-                BigUint::from_bytes_be(&boolvec_to_u8vec(&bits[offset..offset + useful_bits - 3]));
-            offset += useful_bits;
 
             // last field element's last 128 bits are for the salt
-            // let mut rng = thread_rng();
-            // let salt: [u8; 16] = rng.gen();
-            // let salt = u8vec_to_boolvec(&salt);
+            let mut rng = thread_rng();
+            let salt: [u8; 16] = rng.gen();
+            let salt = u8vec_to_boolvec(&salt);
 
-            // let mut last_fe = vec![false; useful_bits];
-            // last_fe[0..useful_bits - 128]
-            //     .copy_from_slice(&bits[offset..offset + (useful_bits - 128)]);
-            //offset += useful_bits - 128;
-            // last_fe[useful_bits - 128..].copy_from_slice(&salt);
-            //chunk[15] = BigUint::from_bytes_be(&boolvec_to_u8vec(&last_fe));
+            let mut last_fe = vec![false; useful_bits];
+            last_fe[0..useful_bits - 128]
+                .copy_from_slice(&bits[offset..offset + (useful_bits - 128)]);
+            offset += useful_bits - 128;
+            last_fe[useful_bits - 128..].copy_from_slice(&salt);
+            chunk[15] = BigUint::from_bytes_be(&boolvec_to_u8vec(&last_fe));
 
-            // let salt = BigUint::from_bytes_be(&boolvec_to_u8vec(&salt));
-            // salts.push(salt);
+            let salt = BigUint::from_bytes_be(&boolvec_to_u8vec(&salt));
+            salts.push(salt);
             chunks.push(chunk);
         }
         (chunks, salts)
     }
 
     // hashes each chunk with Poseidon and returns digests for each chunk
-    fn hash_chunks(&mut self, chunks: Vec<[BigUint; 15]>) -> Vec<BigUint> {
+    fn hash_chunks(&mut self, chunks: Vec<[BigUint; 16]>) -> Vec<BigUint> {
         return chunks
             .iter()
             .map(|chunk| self.poseidon(chunk.to_vec()))
@@ -174,24 +167,26 @@ impl LsumProver {
             .map(|bigint| bigint.to_string())
             .collect();
         // For now dealing with one chunk only
-        let deltas_ = &deltas[0..self.useful_bits.unwrap() * 15 - 3];
-        let mut deltas_chunk: Vec<Vec<BigUint>> = Vec::with_capacity(15);
-        for i in 0..14 {
+        let mut deltas_chunk: Vec<Vec<BigUint>> = Vec::with_capacity(16);
+        for i in 0..15 {
             deltas_chunk.push(deltas[i * 253..(i + 1) * 253].to_vec());
         }
-        deltas_chunk.push(deltas[14 * 253..15 * 253 - 3].to_vec());
 
         // There are as many deltas as there are bits in the plaintext
         let delta_str: Vec<Vec<String>> = deltas_chunk
             .iter()
             .map(|v| v.iter().map(|b| b.to_string()).collect())
             .collect();
+        let delta_last = &deltas[15 * 253..16 * 253 - 128];
+        let delta_last_str: Vec<String> = delta_last.iter().map(|v| v.to_string()).collect();
+
         let mut data = object! {
             label_sum_hash: label_sum_hash.to_string(),
             plaintext_hash: self.hashes_of_chunks.as_ref().unwrap()[0].to_string(),
             sum_of_zero_labels: zero_sum.to_string(),
             plaintext: pt_str,
-            delta: delta_str
+            delta: delta_str,
+            delta_last: delta_last_str
         };
         let s = stringify_pretty(data, 4);
         fs::write("input.json", s).expect("Unable to write file");
@@ -274,24 +269,24 @@ mod tests {
         prover.setup();
 
         // Check chunk1 correctness
-        let chunk1: Vec<u128> = prover.chunks.clone().unwrap()[0][0..14]
+        let chunk1: Vec<u128> = prover.chunks.clone().unwrap()[0][0..15]
             .iter()
             .map(|bigint| bigint.to_u128().unwrap())
             .collect();
         assert_eq!(chunk1, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
         // the last field element must be random salt. We just check that the
         // salt has been set, i.e. it is not equal 0
-        assert!(!prover.chunks.clone().unwrap()[0][14].eq(&BigUint::from_u8(0).unwrap()));
+        assert!(!prover.chunks.clone().unwrap()[0][15].eq(&BigUint::from_u8(0).unwrap()));
 
         // Check chunk2 correctness
-        let chunk2: Vec<u128> = prover.chunks.clone().unwrap()[1][0..14]
+        let chunk2: Vec<u128> = prover.chunks.clone().unwrap()[1][0..15]
             .iter()
             .map(|bigint| bigint.to_u128().unwrap())
             .collect();
         assert_eq!(chunk2, [16, 17, 18, 19, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         // the last field element must be random salt. We just check that the
         // salt has been set, i.e. it is not equal 0
-        assert!(!prover.chunks.clone().unwrap()[1][14].eq(&BigUint::from_u8(0).unwrap()));
+        assert!(!prover.chunks.clone().unwrap()[1][15].eq(&BigUint::from_u8(0).unwrap()));
     }
 
     #[test]

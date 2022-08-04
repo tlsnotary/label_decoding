@@ -17,6 +17,7 @@ template Num2Bits(n) {
     lc1 === in;
 }
 
+// Compute inner product on the high "count" bits of the plaintext.
 template InnerProd(count){
     signal input plaintext;
     signal input deltas[count];
@@ -25,19 +26,16 @@ template InnerProd(count){
     component n2b = Num2Bits(253);
     plaintext ==> n2b.in;
 
-    signal sum[count];
+    // the last element of sum will contain the accumulated sum total
+    signal sum[count+1];
+    sum[0] <== 0;
     for (var i=0; i<count; i++) {
         // Num2Bits returns bits in "least bit first" order
         // but deltas are in the opposite bit order.
         // So, we reverse the bits.
-        sum[i] <== n2b.out[count-1-i] * deltas[i];
+        sum[i+1] <== sum[i] + n2b.out[253-1-i] * deltas[i];
     }
 
-    var total = 0;
-    for (var i=0; i<count; i++) {
-        total += sum[i];
-    }
-
-    out <== total;
+    out <== sum[count];
 }
 
