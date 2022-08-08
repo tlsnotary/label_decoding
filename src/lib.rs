@@ -93,6 +93,9 @@ mod tests {
         let (deltas, zero_sum) = verifier.receive_labelsum_hash(label_sum_hash);
         // Notary sends zero_sum and all deltas
         // Prover constructs input to snarkjs
-        prover.create_zk_proof(zero_sum, deltas);
+        let proof = prover.create_zk_proof(zero_sum, deltas).unwrap();
+
+        // Verifier verifies the proof
+        assert_eq!(verifier.verify(proof).unwrap(), true);
     }
 }

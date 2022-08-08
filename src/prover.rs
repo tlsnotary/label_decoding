@@ -5,17 +5,28 @@ use num::bigint::ToBigUint;
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
 use rand::{thread_rng, Rng};
 use std::fs;
-use std::process::Command;
+use std::process::{Command, Output};
 use std::str;
 
 #[derive(Debug)]
 pub enum Error {
     ProvingKeyNotFound,
     FileSystemError,
+    FileDoesNotExist,
+    SnarkjsError,
 }
 
 use super::BN254_PRIME;
 
+fn check_output(output: Result<Output, std::io::Error>) -> Result<(), Error> {
+    if output.is_err() {
+        return Err(Error::SnarkjsError);
+    }
+    if !output.unwrap().status.success() {
+        return Err(Error::SnarkjsError);
+    }
+    Ok(())
+}
 // implementation of the Prover in the "label_sum" protocol (aka the User).
 pub struct LsumProver {
     plaintext: Option<Vec<u8>>,
@@ -210,8 +221,11 @@ impl LsumProver {
         bi
     }
 
-    pub fn create_zk_proof(&mut self, zero_sum: BigUint, deltas: Vec<BigUint>) {
-        // hash label_sum
+    pub fn create_zk_proof(
+        &mut self,
+        zero_sum: BigUint,
+        deltas: Vec<BigUint>,
+    ) -> Result<Vec<u8>, Error> {
         let label_sum_hash = self.label_sum_hash.as_ref().unwrap().clone();
 
         // write inputs into input.json
@@ -244,6 +258,10 @@ impl LsumProver {
         };
         let s = stringify_pretty(data, 4);
         fs::write("input.json", s).expect("Unable to write file");
+        let output = Command::new("node").args(["prove.mjs"]).output();
+        check_output(output)?;
+        let proof = fs::read("proof.json").unwrap();
+        Ok(proof)
     }
 }
 

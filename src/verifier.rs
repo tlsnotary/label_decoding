@@ -5,13 +5,25 @@ use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
 use rand::{thread_rng, Rng};
 use std::fs;
 use std::path::Path;
+use std::process::{Command, Output};
 
 #[derive(Debug)]
 pub enum Error {
     ProvingKeyNotFound,
     FileSystemError,
+    FileDoesNotExist,
+    SnarkjsError,
 }
 
+fn check_output(output: &Result<Output, std::io::Error>) -> Result<(), Error> {
+    if output.is_err() {
+        return Err(Error::SnarkjsError);
+    }
+    if !output.as_ref().unwrap().status.success() {
+        return Err(Error::SnarkjsError);
+    }
+    Ok(())
+}
 // implementation of the Verifier in the "label sum" protocol (aka the Notary).
 pub struct LsumVerifier {
     // hashes for each chunk of Prover's plaintext
@@ -121,6 +133,16 @@ impl LsumVerifier {
             self.deltas.as_ref().unwrap().clone(),
             self.zero_sum.as_ref().unwrap().clone(),
         )
+    }
+
+    pub fn verify(&mut self, proof: Vec<u8>) -> Result<bool, Error> {
+        fs::write("proof.json", proof).expect("Unable to write file");
+        let output = Command::new("node").args(["verify.mjs"]).output();
+        check_output(&output)?;
+        if output.unwrap().status.success() {
+            return Ok(true);
+        }
+        return Ok(false);
     }
 }
 
