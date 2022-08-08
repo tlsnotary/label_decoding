@@ -21,3 +21,11 @@ snarkjs groth16 fullprove input.json circuit_js/circuit.wasm circuit_final.zkey 
 
 
 snarkjs groth16 verify verification_key.json public.json proof.json
+
+
+
+We can generate circuit.wasm and circuit.r1cs deterministically with circom 2.0.5+
+circom circuit.circom --r1cs --wasm
+and then ship the User with .wasm and the Notary with .r1cs
+
+write a onetimesetup.js script and call it with node

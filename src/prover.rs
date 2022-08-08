@@ -1,17 +1,24 @@
+use aes::{Aes128, BlockDecrypt, NewBlockCipher};
+use cipher::{consts::U16, generic_array::GenericArray, BlockCipher, BlockEncrypt};
 use json::{object, stringify, stringify_pretty};
-/// implementing the "label sum" protocol
-///
+use num::bigint::ToBigUint;
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
 use rand::{thread_rng, Rng};
 use std::fs;
 use std::process::Command;
 use std::str;
 
+#[derive(Debug)]
+pub enum Error {
+    ProvingKeyNotFound,
+    FileSystemError,
+}
+
 use super::BN254_PRIME;
 
-// implementation of the Prover in the "label sum" protocol (aka the User).
+// implementation of the Prover in the "label_sum" protocol (aka the User).
 pub struct LsumProver {
-    plaintext: Vec<u8>,
+    plaintext: Option<Vec<u8>>,
     // the prime of the field in which Poseidon hash will be computed.
     field_prime: BigUint,
     // how many bits to pack into one field element
@@ -25,10 +32,12 @@ pub struct LsumProver {
     // security b/c w/o the salt, hashes of plaintext with low entropy could be
     // brute-forced.
     salts: Option<Vec<BigUint>>,
+    // hash of all our arithmetic labels
+    label_sum_hash: Option<BigUint>,
 }
 
 impl LsumProver {
-    pub fn new(plaintext: Vec<u8>, field_prime: BigUint) -> Self {
+    pub fn new(field_prime: BigUint) -> Self {
         if field_prime.bits() < 129 {
             // last field element must be large enough to contain the 128-bit
             // salt. In the future, if we need to support fields < 129 bits,
@@ -36,24 +45,69 @@ impl LsumProver {
             panic!("Error: expected a prime >= 129 bits");
         }
         Self {
-            plaintext,
+            plaintext: None,
             field_prime,
             useful_bits: None,
             chunks: None,
             salts: None,
             hashes_of_chunks: None,
+            label_sum_hash: None,
         }
     }
 
+    pub fn set_proving_key(&mut self, key: Vec<u8>) -> Result<(), Error> {
+        let res = fs::write("circuit_final.zkey", key);
+        if res.is_err() {
+            return Err(Error::FileSystemError);
+        }
+        Ok(())
+    }
+
     // Return hash digests which is Prover's commitment to the plaintext
-    pub fn setup(&mut self) -> Vec<BigUint> {
-        let useful_bits = compute_useful_bits(self.field_prime.clone());
+    pub fn setup(&mut self, plaintext: Vec<u8>) -> Vec<BigUint> {
+        self.plaintext = Some(plaintext);
+        let useful_bits = calculate_useful_bits(self.field_prime.clone());
         self.useful_bits = Some(useful_bits);
         let (chunks, salts) = self.plaintext_to_chunks();
         self.chunks = Some(chunks.clone());
         self.salts = Some(salts);
         self.hashes_of_chunks = Some(self.hash_chunks(chunks));
         self.hashes_of_chunks.as_ref().unwrap().to_vec()
+    }
+
+    // decrypt each encrypted arithm.label based on the p&p bit of our active
+    // binary label. Return the hash of the sum of all arithm. labels.
+    pub fn compute_label_sum(
+        &mut self,
+        ciphertexts: &Vec<[Vec<u8>; 2]>,
+        labels: &Vec<u128>,
+    ) -> BigUint {
+        // if binary label's p&p bit is 0, decrypt the 1st ciphertext,
+        // otherwise - the 2nd one.
+        assert!(ciphertexts.len() == labels.len());
+        let mut label_sum = BigUint::from_u8(0).unwrap();
+        let _unused: Vec<()> = ciphertexts
+            .iter()
+            .zip(labels)
+            .map(|(ct_pair, label)| {
+                let key = Aes128::new_from_slice(&label.to_be_bytes()).unwrap();
+                // choose which ciphertext to decrypt based on the point-and-permute bit
+                let mut ct = [0u8; 16];
+                if label & 1 == 0 {
+                    ct.copy_from_slice(&ct_pair[0]);
+                } else {
+                    ct.copy_from_slice(&ct_pair[1]);
+                }
+                let mut ct: GenericArray<u8, U16> = GenericArray::from(ct);
+                key.decrypt_block(&mut ct);
+                // add the decrypted arithmetic label to the sum
+                label_sum += BigUint::from_bytes_be(&ct);
+            })
+            .collect();
+        println!("{:?} label_sum", label_sum);
+        let label_sum_hash = self.poseidon(vec![label_sum]);
+        self.label_sum_hash = Some(label_sum_hash.clone());
+        label_sum_hash
     }
 
     // create chunks of plaintext where each chunk consists of 16 field elements.
@@ -67,7 +121,7 @@ impl LsumProver {
 
         //let chunk_size = useful_bits * 16;
         // plaintext converted into bits
-        let mut bits = u8vec_to_boolvec(&self.plaintext);
+        let mut bits = u8vec_to_boolvec(&self.plaintext.as_ref().unwrap());
         // chunk count (rounded up)
         let chunk_count = (bits.len() + (chunk_size - 1)) / chunk_size;
         // extend bits with zeroes to fill the chunk
@@ -97,8 +151,7 @@ impl LsumProver {
                 BigUint::default(),
                 BigUint::default(),
             ];
-            // TODO dont use salt for now, to make debugging easier, later change this to
-            // for j in 0..15 { and uncomment the lines below //offset and //chunk[15]
+
             for j in 0..15 {
                 // convert bits into field element
                 chunk[j] =
@@ -148,6 +201,7 @@ impl LsumProver {
             .args(["poseidon.mjs", &json])
             .output()
             .unwrap();
+        println!("{:?}", output);
         // drop the trailing new line
         let output = &output.stdout[0..output.stdout.len() - 1];
         let s = String::from_utf8(output.to_vec()).unwrap();
@@ -156,9 +210,9 @@ impl LsumProver {
         bi
     }
 
-    pub fn create_zk_proof(&mut self, zero_sum: BigUint, deltas: Vec<BigUint>, label_sum: BigUint) {
+    pub fn create_zk_proof(&mut self, zero_sum: BigUint, deltas: Vec<BigUint>) {
         // hash label_sum
-        let label_sum_hash = self.poseidon(vec![label_sum.clone()]);
+        let label_sum_hash = self.label_sum_hash.as_ref().unwrap().clone();
 
         // write inputs into input.json
         let pt_str: Vec<String> = self.chunks.as_ref().unwrap()[0]
@@ -181,8 +235,8 @@ impl LsumProver {
         let delta_last_str: Vec<String> = delta_last.iter().map(|v| v.to_string()).collect();
 
         let mut data = object! {
-            label_sum_hash: label_sum_hash.to_string(),
             plaintext_hash: self.hashes_of_chunks.as_ref().unwrap()[0].to_string(),
+            label_sum_hash: label_sum_hash.to_string(),
             sum_of_zero_labels: zero_sum.to_string(),
             plaintext: pt_str,
             delta: delta_str,
@@ -193,18 +247,18 @@ impl LsumProver {
     }
 }
 
-/// Computes how many bits of plaintext we will pack into one field element.
+/// Calculates how many bits of plaintext we will pack into one field element.
 /// Essentially, this is field_prime bit length minus 1.
-fn compute_useful_bits(field_prime: BigUint) -> usize {
+fn calculate_useful_bits(field_prime: BigUint) -> usize {
     (field_prime.bits() - 1) as usize
 }
 
 #[test]
 fn test_compute_full_bits() {
-    assert_eq!(compute_useful_bits(BigUint::from_u16(13).unwrap()), 3);
-    assert_eq!(compute_useful_bits(BigUint::from_u16(255).unwrap()), 7);
+    assert_eq!(calculate_useful_bits(BigUint::from_u16(13).unwrap()), 3);
+    assert_eq!(calculate_useful_bits(BigUint::from_u16(255).unwrap()), 7);
     assert_eq!(
-        compute_useful_bits(String::from(BN254_PRIME,).parse::<BigUint>().unwrap()),
+        calculate_useful_bits(String::from(BN254_PRIME,).parse::<BigUint>().unwrap()),
         253
     );
 }
@@ -265,8 +319,8 @@ mod tests {
             plaintext[(15 * 17 + 1) + i * 17 + 16] = (i + 16) as u8;
         }
 
-        let mut prover = LsumProver::new(plaintext, prime);
-        prover.setup();
+        let mut prover = LsumProver::new(prime);
+        prover.setup(plaintext);
 
         // Check chunk1 correctness
         let chunk1: Vec<u128> = prover.chunks.clone().unwrap()[0][0..15]
@@ -298,7 +352,7 @@ mod tests {
         let prime = BigUint::from_bytes_be(&prime);
         // plaintext will spawn 2 chunks
         let mut plaintext = vec![0u8; 17 * 15 + 1 + 17 * 5];
-        let mut prover = LsumProver::new(plaintext, prime);
+        let mut prover = LsumProver::new(prime);
         //LsumProver::hash_chunks(&mut prover);
     }
 

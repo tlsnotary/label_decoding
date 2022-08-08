@@ -21,7 +21,9 @@ template Main() {
     for (var i = 0; i<w; i++) {
        hash.inputs[i] <== plaintext[i];
     }
+    log(1);
     plaintext_hash === hash.out;
+    log(2);
 
     // the last element of sum_of_deltas will contain the accumulated sum total
     signal sum_of_deltas[w+1];
@@ -48,6 +50,7 @@ template Main() {
     
     component ls_hash = Poseidon(1);
     ls_hash.inputs[0] <== sum_of_zero_labels + sum_of_deltas[w];
+    log(3);
     label_sum_hash === ls_hash.out;
 }
-component main {public [plaintext_hash, label_sum_hash, delta, delta_last, sum_of_zero_labels]} = Main();
+component main {public [plaintext_hash, label_sum_hash, sum_of_zero_labels, delta, delta_last]} = Main();
