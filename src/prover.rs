@@ -4,9 +4,11 @@ use json::{object, stringify, stringify_pretty};
 use num::bigint::ToBigUint;
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
 use rand::{thread_rng, Rng};
+use std::env::temp_dir;
 use std::fs;
 use std::process::{Command, Output};
 use std::str;
+use uuid::Uuid;
 
 #[derive(Debug)]
 pub enum Error {
@@ -67,7 +69,7 @@ impl LsumProver {
     }
 
     pub fn set_proving_key(&mut self, key: Vec<u8>) -> Result<(), Error> {
-        let res = fs::write("circuit_final.zkey", key);
+        let res = fs::write("circuit_final.zkey.verifier", key);
         if res.is_err() {
             return Err(Error::FileSystemError);
         }
@@ -270,10 +272,24 @@ impl LsumProver {
             delta_last: delta_last_str
         };
         let s = stringify_pretty(data, 4);
-        fs::write("input.json", s).expect("Unable to write file");
-        let output = Command::new("node").args(["prove.mjs"]).output();
+
+        let mut path1 = temp_dir();
+        let mut path2 = temp_dir();
+        path1.push(format!("input.json.{}", Uuid::new_v4()));
+        path2.push(format!("proof.json.{}", Uuid::new_v4()));
+
+        fs::write(path1.clone(), s).expect("Unable to write file");
+        let output = Command::new("node")
+            .args([
+                "prove.mjs",
+                path1.to_str().unwrap(),
+                path2.to_str().unwrap(),
+            ])
+            .output();
+        fs::remove_file(path1);
         check_output(output)?;
-        let proof = fs::read("proof.json").unwrap();
+        let proof = fs::read(path2.clone()).unwrap();
+        fs::remove_file(path2);
         Ok(proof)
     }
 }

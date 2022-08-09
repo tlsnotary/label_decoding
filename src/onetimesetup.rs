@@ -48,7 +48,7 @@ impl OneTimeSetup {
         // check if any of the files hasn't been generated. If so, regenerate
         // all files.
         if !Path::new("circuit_0000.zkey").exists()
-            || !Path::new("circuit_final.zkey").exists()
+            || !Path::new("circuit_final.zkey.prover").exists()
             || !Path::new("verification_key.json").exists()
         {
             let entropy = self.generate_entropy();

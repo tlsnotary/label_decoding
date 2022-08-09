@@ -4,9 +4,11 @@ use cipher::{consts::U16, generic_array::GenericArray, BlockCipher, BlockEncrypt
 use json::{array, object, stringify, stringify_pretty, JsonValue};
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
 use rand::{thread_rng, Rng};
+use std::env::temp_dir;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
+use uuid::Uuid;
 
 #[derive(Debug)]
 pub enum Error {
@@ -54,10 +56,10 @@ impl LsumVerifier {
     }
 
     pub fn get_proving_key(&mut self) -> Result<Vec<u8>, Error> {
-        if !Path::new("circuit_final.zkey").exists() {
+        if !Path::new("circuit_final.zkey.prover").exists() {
             return Err(Error::ProvingKeyNotFound);
         }
-        let res = fs::read("circuit_final.zkey");
+        let res = fs::read("circuit_final.zkey.prover");
         if res.is_err() {
             return Err(Error::FileSystemError);
         }
@@ -139,8 +141,6 @@ impl LsumVerifier {
     }
 
     pub fn verify(&mut self, proof: Vec<u8>) -> Result<bool, Error> {
-        fs::write("proof.json", proof).expect("Unable to write file");
-
         // // Write public.json. The elements must be written in the exact order
         // // as below, that's the order snarkjs expects them to be in.
 
@@ -195,9 +195,23 @@ impl LsumVerifier {
         public_json.push(self.zero_sum.as_ref().unwrap().clone().to_string());
 
         let s = stringify(JsonValue::from(public_json.clone()));
-        fs::write("public.json", s).expect("Unable to write file");
 
-        let output = Command::new("node").args(["verify.mjs"]).output();
+        let mut path1 = temp_dir();
+        let mut path2 = temp_dir();
+        path1.push(format!("public.json.{}", Uuid::new_v4()));
+        path2.push(format!("proof.json.{}", Uuid::new_v4()));
+        fs::write(path1.clone(), s).expect("Unable to write file");
+        fs::write(path2.clone(), proof).expect("Unable to write file");
+
+        let output = Command::new("node")
+            .args([
+                "verify.mjs",
+                path1.to_str().unwrap(),
+                path2.to_str().unwrap(),
+            ])
+            .output();
+        fs::remove_file(path1);
+        fs::remove_file(path2);
         check_output(&output)?;
         if output.unwrap().status.success() {
             return Ok(true);
