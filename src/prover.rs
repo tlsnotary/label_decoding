@@ -141,9 +141,9 @@ impl LsumProver {
         let mut salts: Vec<BigUint> = Vec::with_capacity(chunk_count);
         // current offset within bits
         let mut offset: usize = 0;
-        for i in 0..chunk_count {
-            // TODO is there a cleaner way to init an array of BigUint b/c
-            // [BigUint::default(); 16]; gave a Copy trait error
+        for _ in 0..chunk_count {
+            // [BigUint::default(); 16] won't work since BigUint doesn't
+            // implement the Copy trait, so typing out all values
             let mut chunk = [
                 BigUint::default(),
                 BigUint::default(),
@@ -228,6 +228,19 @@ impl LsumProver {
     ) -> Result<Vec<u8>, Error> {
         let label_sum_hash = self.label_sum_hash.as_ref().unwrap().clone();
 
+        // the last chunk will be padded with zero plaintext. We also should pad
+        // the deltas of the last chunk
+        let useful_bits = self.useful_bits.unwrap();
+        // the size of a chunk of plaintext not counting the salt
+        let chunk_size = useful_bits * 16 - 128;
+        let rem = deltas.len() % chunk_size;
+        // amount of 0 deltas we need to add to the public inputs of the proof
+        let delta_pad_count = if rem == 0 { 0 } else { chunk_size - rem };
+        let padding: Vec<BigUint> = vec![BigUint::from_u8(0).unwrap(); delta_pad_count];
+        let mut padded_deltas: Vec<BigUint> = Vec::with_capacity(chunk_size * 16);
+        padded_deltas.extend(deltas);
+        padded_deltas.extend(padding);
+
         // write inputs into input.json
         let pt_str: Vec<String> = self.chunks.as_ref().unwrap()[0]
             .to_vec()
@@ -237,7 +250,7 @@ impl LsumProver {
         // For now dealing with one chunk only
         let mut deltas_chunk: Vec<Vec<BigUint>> = Vec::with_capacity(16);
         for i in 0..15 {
-            deltas_chunk.push(deltas[i * 253..(i + 1) * 253].to_vec());
+            deltas_chunk.push(padded_deltas[i * 253..(i + 1) * 253].to_vec());
         }
 
         // There are as many deltas as there are bits in the plaintext
@@ -245,7 +258,7 @@ impl LsumProver {
             .iter()
             .map(|v| v.iter().map(|b| b.to_string()).collect())
             .collect();
-        let delta_last = &deltas[15 * 253..16 * 253 - 128];
+        let delta_last = &padded_deltas[15 * 253..16 * 253 - 128];
         let delta_last_str: Vec<String> = delta_last.iter().map(|v| v.to_string()).collect();
 
         let mut data = object! {

@@ -53,4 +53,4 @@ template Main() {
     log(3);
     label_sum_hash === ls_hash.out;
 }
-component main {public [plaintext_hash, label_sum_hash, sum_of_zero_labels, delta, delta_last]} = Main();
+component main {public [sum_of_zero_labels, plaintext_hash, label_sum_hash, delta, delta_last]} = Main();

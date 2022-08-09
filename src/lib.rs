@@ -56,7 +56,7 @@ mod tests {
         // Our Poseidon is 16-arity * 253 bits each - 128 bits (salt) == 490 bytes
         let mut plaintext = [0u8; 512];
         rng.fill(&mut plaintext);
-        let plaintext = &plaintext[0..490];
+        let plaintext = &plaintext[0..320];
 
         // Normally, the Prover is expected to obtain her binary labels by
         // evaluating the garbled circuit.

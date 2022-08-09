@@ -1,6 +1,7 @@
 use super::to_16_bytes;
 use aes::{Aes128, NewBlockCipher};
 use cipher::{consts::U16, generic_array::GenericArray, BlockCipher, BlockEncrypt};
+use json::{array, object, stringify, stringify_pretty, JsonValue};
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
 use rand::{thread_rng, Rng};
 use std::fs;
@@ -36,6 +37,7 @@ pub struct LsumVerifier {
     deltas: Option<Vec<BigUint>>,
     zero_sum: Option<BigUint>,
     ciphertexts: Option<Vec<[Vec<u8>; 2]>>,
+    useful_bits: usize,
 }
 
 impl LsumVerifier {
@@ -47,6 +49,7 @@ impl LsumVerifier {
             deltas: None,
             zero_sum: None,
             ciphertexts: None,
+            useful_bits: 253,
         }
     }
 
@@ -137,6 +140,63 @@ impl LsumVerifier {
 
     pub fn verify(&mut self, proof: Vec<u8>) -> Result<bool, Error> {
         fs::write("proof.json", proof).expect("Unable to write file");
+
+        // // Write public.json. The elements must be written in the exact order
+        // // as below, that's the order snarkjs expects them to be in.
+
+        // the last chunk will be padded with zero plaintext. We also should pad
+        // the deltas of the last chunk
+        let useful_bits = self.useful_bits;
+        // the size of a chunk of plaintext not counting the salt
+        let chunk_size = useful_bits * 16 - 128;
+        let chunk_count = (self.deltas.as_ref().unwrap().len() + (chunk_size - 1)) / chunk_size;
+        let rem = self.deltas.as_ref().unwrap().len() % chunk_size;
+        // amount of 0 deltas we need to add to the public inputs of the proof
+        let delta_pad_count = if rem == 0 { 0 } else { chunk_size - rem };
+        let padding: Vec<BigUint> = vec![BigUint::from_u8(0).unwrap(); delta_pad_count];
+        let mut padded_deltas: Vec<BigUint> = Vec::with_capacity(chunk_size * 16);
+        padded_deltas.extend(self.deltas.as_ref().unwrap().clone());
+        padded_deltas.extend(padding);
+
+        let mut chunks: Vec<Vec<Vec<BigUint>>> = Vec::with_capacity(chunk_count);
+        // current offset within bits
+        let mut offset: usize = 0;
+        for _ in 0..chunk_count {
+            let mut chunk: Vec<Vec<BigUint>> = Vec::with_capacity(16);
+            for _ in 0..15 {
+                // convert bits into field element
+                chunk.push(padded_deltas[offset..offset + useful_bits].to_vec());
+                offset += useful_bits;
+            }
+            chunk.push(padded_deltas[offset..offset + (useful_bits - 128)].to_vec());
+            chunks.push(chunk);
+        }
+
+        // Even though there may be multiple chunks, we are dealing with
+        // one chunk for now.
+
+        // There are as many deltas as there are bits in the plaintext
+        let delta_str: Vec<Vec<String>> = chunks[0][0..15]
+            .iter()
+            .map(|v| v.iter().map(|b| b.to_string()).collect())
+            .collect();
+        let delta_last_str: Vec<String> = chunks[0][15].iter().map(|v| v.to_string()).collect();
+
+        // public.json is a flat array
+        let mut public_json: Vec<String> = Vec::new();
+        public_json.push(
+            self.plaintext_hashes.as_ref().unwrap()[0]
+                .clone()
+                .to_string(),
+        );
+        public_json.push(self.labelsum_hash.as_ref().unwrap().clone().to_string());
+        public_json.extend::<Vec<String>>(delta_str.into_iter().flatten().collect());
+        public_json.extend(delta_last_str);
+        public_json.push(self.zero_sum.as_ref().unwrap().clone().to_string());
+
+        let s = stringify(JsonValue::from(public_json.clone()));
+        fs::write("public.json", s).expect("Unable to write file");
+
         let output = Command::new("node").args(["verify.mjs"]).output();
         check_output(&output)?;
         if output.unwrap().status.success() {
