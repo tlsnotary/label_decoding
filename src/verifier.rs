@@ -31,13 +31,13 @@ fn check_output(output: &Result<Output, std::io::Error>) -> Result<(), Error> {
 pub struct LsumVerifier {
     // hashes for each chunk of Prover's plaintext
     plaintext_hashes: Option<Vec<BigUint>>,
-    labelsum_hash: Option<BigUint>,
+    labelsum_hashes: Option<Vec<BigUint>>,
     // if set to true, then we must send the proving key to the Prover
     // before this protocol begins. Otherwise, it is assumed that the Prover
     // already has the proving key from a previous interaction with us.
     proving_key_needed: bool,
     deltas: Option<Vec<BigUint>>,
-    zero_sum: Option<BigUint>,
+    zero_sums: Option<Vec<BigUint>>,
     ciphertexts: Option<Vec<[Vec<u8>; 2]>>,
     useful_bits: usize,
 }
@@ -46,10 +46,10 @@ impl LsumVerifier {
     pub fn new(proving_key_needed: bool) -> Self {
         Self {
             plaintext_hashes: None,
-            labelsum_hash: None,
+            labelsum_hashes: None,
             proving_key_needed,
             deltas: None,
-            zero_sum: None,
+            zero_sums: None,
             ciphertexts: None,
             useful_bits: 253,
         }
@@ -74,27 +74,54 @@ impl LsumVerifier {
         // call to AES.
         // To keep the handling simple, we want to avoid a negative delta, that's why
         // W_0 and delta must be 127-bit values and W_1 will be set to W_0 + delta
+
         let bitsize = labels.len();
-        let mut zero_sum = BigUint::from_u8(0).unwrap();
+        let chunk_size = 253 * 16 - 128;
+        let chunk_count = (bitsize + (chunk_size - 1)) / chunk_size;
+
+        let mut zero_sums: Vec<BigUint> = Vec::with_capacity(chunk_count);
         let mut deltas: Vec<BigUint> = Vec::with_capacity(bitsize);
-        let arithm_labels: Vec<[BigUint; 2]> = (0..bitsize)
-            .map(|_| {
-                let zero_label = random_bigint(127);
-                let delta = random_bigint(127);
-                let one_label = zero_label.clone() + delta.clone();
-                zero_sum += zero_label.clone();
-                deltas.push(delta);
-                [zero_label, one_label]
-            })
-            .collect();
-        self.zero_sum = Some(zero_sum);
+        let mut all_arithm_labels: Vec<[BigUint; 2]> = Vec::with_capacity(bitsize);
+
+        for count in 0..chunk_count {
+            // calculate zero_sum for each chunk of plaintext separately
+            let mut zero_sum = BigUint::from_u8(0).unwrap();
+            // end of range is different for the last chunk
+            let end = if count < chunk_count - 1 {
+                (count + 1) * chunk_size
+            } else {
+                // compute the size of the gap at the end of the last chunk
+                let last_size = bitsize % chunk_size;
+                let gap_size = if last_size == 0 {
+                    0
+                } else {
+                    chunk_size - last_size
+                };
+                (count + 1) * chunk_size - gap_size
+            };
+            all_arithm_labels.append(
+                &mut (count * chunk_size..end)
+                    .map(|_| {
+                        let zero_label = random_bigint(127);
+                        let delta = random_bigint(127);
+                        let one_label = zero_label.clone() + delta.clone();
+                        zero_sum += zero_label.clone();
+                        deltas.push(delta);
+                        [zero_label, one_label]
+                    })
+                    .collect(),
+            );
+            zero_sums.push(zero_sum);
+        }
+        self.zero_sums = Some(zero_sums);
         self.deltas = Some(deltas);
 
+        // flatten all arithmetic labels
         // encrypt each arithmetic label using a corresponding binary label as a key
         // place ciphertexts in an order based on binary label's p&p bit
         let ciphertexts: Vec<[Vec<u8>; 2]> = labels
             .iter()
-            .zip(arithm_labels)
+            .zip(all_arithm_labels)
             .map(|(bin_pair, arithm_pair)| {
                 let zero_key = Aes128::new_from_slice(&bin_pair[0].to_be_bytes()).unwrap();
                 let one_key = Aes128::new_from_slice(&bin_pair[1].to_be_bytes()).unwrap();
@@ -132,15 +159,15 @@ impl LsumVerifier {
 
     // receive the hash commitment to the Prover's sum of labels and reveal all
     // deltas and zero_sum.
-    pub fn receive_labelsum_hash(&mut self, hash: BigUint) -> (Vec<BigUint>, BigUint) {
-        self.labelsum_hash = Some(hash);
+    pub fn receive_labelsum_hash(&mut self, hashes: Vec<BigUint>) -> (Vec<BigUint>, Vec<BigUint>) {
+        self.labelsum_hashes = Some(hashes);
         (
             self.deltas.as_ref().unwrap().clone(),
-            self.zero_sum.as_ref().unwrap().clone(),
+            self.zero_sums.as_ref().unwrap().clone(),
         )
     }
 
-    pub fn verify(&mut self, proof: Vec<u8>) -> Result<bool, Error> {
+    pub fn verify(&mut self, proofs: Vec<Vec<u8>>) -> Result<bool, Error> {
         // // Write public.json. The elements must be written in the exact order
         // // as below, that's the order snarkjs expects them to be in.
 
@@ -158,6 +185,8 @@ impl LsumVerifier {
         padded_deltas.extend(self.deltas.as_ref().unwrap().clone());
         padded_deltas.extend(padding);
 
+        assert!(proofs.len() == chunk_count);
+
         let mut chunks: Vec<Vec<Vec<BigUint>>> = Vec::with_capacity(chunk_count);
         // current offset within bits
         let mut offset: usize = 0;
@@ -172,51 +201,54 @@ impl LsumVerifier {
             chunks.push(chunk);
         }
 
-        // Even though there may be multiple chunks, we are dealing with
-        // one chunk for now.
+        for count in 0..chunk_count {
+            // There are as many deltas as there are bits in the plaintext
+            let delta_str: Vec<Vec<String>> = chunks[count][0..15]
+                .iter()
+                .map(|v| v.iter().map(|b| b.to_string()).collect())
+                .collect();
+            let delta_last_str: Vec<String> = chunks[0][15].iter().map(|v| v.to_string()).collect();
 
-        // There are as many deltas as there are bits in the plaintext
-        let delta_str: Vec<Vec<String>> = chunks[0][0..15]
-            .iter()
-            .map(|v| v.iter().map(|b| b.to_string()).collect())
-            .collect();
-        let delta_last_str: Vec<String> = chunks[0][15].iter().map(|v| v.to_string()).collect();
+            // public.json is a flat array
+            let mut public_json: Vec<String> = Vec::new();
+            public_json.push(
+                self.plaintext_hashes.as_ref().unwrap()[0]
+                    .clone()
+                    .to_string(),
+            );
+            public_json.push(
+                self.labelsum_hashes.as_ref().unwrap()[count]
+                    .clone()
+                    .to_string(),
+            );
+            public_json.extend::<Vec<String>>(delta_str.into_iter().flatten().collect());
+            public_json.extend(delta_last_str);
+            public_json.push(self.zero_sums.as_ref().unwrap()[count].clone().to_string());
 
-        // public.json is a flat array
-        let mut public_json: Vec<String> = Vec::new();
-        public_json.push(
-            self.plaintext_hashes.as_ref().unwrap()[0]
-                .clone()
-                .to_string(),
-        );
-        public_json.push(self.labelsum_hash.as_ref().unwrap().clone().to_string());
-        public_json.extend::<Vec<String>>(delta_str.into_iter().flatten().collect());
-        public_json.extend(delta_last_str);
-        public_json.push(self.zero_sum.as_ref().unwrap().clone().to_string());
+            let s = stringify(JsonValue::from(public_json.clone()));
 
-        let s = stringify(JsonValue::from(public_json.clone()));
+            let mut path1 = temp_dir();
+            let mut path2 = temp_dir();
+            path1.push(format!("public.json.{}", Uuid::new_v4()));
+            path2.push(format!("proof.json.{}", Uuid::new_v4()));
+            fs::write(path1.clone(), s).expect("Unable to write file");
+            fs::write(path2.clone(), proofs[count].clone()).expect("Unable to write file");
 
-        let mut path1 = temp_dir();
-        let mut path2 = temp_dir();
-        path1.push(format!("public.json.{}", Uuid::new_v4()));
-        path2.push(format!("proof.json.{}", Uuid::new_v4()));
-        fs::write(path1.clone(), s).expect("Unable to write file");
-        fs::write(path2.clone(), proof).expect("Unable to write file");
-
-        let output = Command::new("node")
-            .args([
-                "verify.mjs",
-                path1.to_str().unwrap(),
-                path2.to_str().unwrap(),
-            ])
-            .output();
-        fs::remove_file(path1);
-        fs::remove_file(path2);
-        check_output(&output)?;
-        if output.unwrap().status.success() {
-            return Ok(true);
+            let output = Command::new("node")
+                .args([
+                    "verify.mjs",
+                    path1.to_str().unwrap(),
+                    path2.to_str().unwrap(),
+                ])
+                .output();
+            fs::remove_file(path1);
+            fs::remove_file(path2);
+            check_output(&output)?;
+            if !output.unwrap().status.success() {
+                return Ok(false);
+            }
         }
-        return Ok(false);
+        return Ok(true);
     }
 }
 

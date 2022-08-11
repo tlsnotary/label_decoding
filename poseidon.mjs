@@ -11,7 +11,7 @@ async function main(){
     poseidonReference.F.toRprBE(buff, 0, res);
     const rv = bufToBn(buff);
 
-    // print to stdout. This is how Rust gets the output
+    // print to stdout. This is how the Rust caller reads the output
     console.log(bufToBn(buff).toString());
 }
 

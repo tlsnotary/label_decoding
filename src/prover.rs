@@ -46,7 +46,8 @@ pub struct LsumProver {
     // brute-forced.
     salts: Option<Vec<BigUint>>,
     // hash of all our arithmetic labels
-    label_sum_hash: Option<BigUint>,
+    label_sum_hashes: Option<Vec<BigUint>>,
+    chunk_size: Option<usize>,
 }
 
 impl LsumProver {
@@ -64,7 +65,8 @@ impl LsumProver {
             chunks: None,
             salts: None,
             hashes_of_chunks: None,
-            label_sum_hash: None,
+            label_sum_hashes: None,
+            chunk_size: None,
         }
     }
 
@@ -89,20 +91,27 @@ impl LsumProver {
     }
 
     // decrypt each encrypted arithm.label based on the p&p bit of our active
-    // binary label. Return the hash of the sum of all arithm. labels.
+    // binary label. Return the hash of the sum of all arithm. labels. Note
+    // that we compute a separate label sum for each chunk of plaintext.
     pub fn compute_label_sum(
         &mut self,
         ciphertexts: &Vec<[Vec<u8>; 2]>,
         labels: &Vec<u128>,
-    ) -> BigUint {
+    ) -> Vec<BigUint> {
         // if binary label's p&p bit is 0, decrypt the 1st ciphertext,
         // otherwise - the 2nd one.
         assert!(ciphertexts.len() == labels.len());
-        let mut label_sum = BigUint::from_u8(0).unwrap();
-        let _unused: Vec<()> = ciphertexts
-            .iter()
-            .zip(labels)
-            .map(|(ct_pair, label)| {
+        assert!(self.plaintext.as_ref().unwrap().len() * 8 == ciphertexts.len());
+        let mut label_sum_hashes: Vec<BigUint> =
+            Vec::with_capacity(self.chunks.as_ref().unwrap().len());
+
+        let ct_iter = ciphertexts.chunks(self.chunk_size.unwrap());
+        let lb_iter = labels.chunks(self.chunk_size.unwrap());
+        // process a pair of chunks of ciphertexts and corresponding labels at a time
+        for (chunk_ct, chunk_lb) in ct_iter.zip(lb_iter){
+            // accumulate the label sum here
+            let mut label_sum = BigUint::from_u8(0).unwrap();
+            for (ct_pair, label) in chunk_ct.iter().zip(chunk_lb) {
                 let key = Aes128::new_from_slice(&label.to_be_bytes()).unwrap();
                 // choose which ciphertext to decrypt based on the point-and-permute bit
                 let mut ct = [0u8; 16];
@@ -115,12 +124,15 @@ impl LsumProver {
                 key.decrypt_block(&mut ct);
                 // add the decrypted arithmetic label to the sum
                 label_sum += BigUint::from_bytes_be(&ct);
-            })
-            .collect();
-        println!("{:?} label_sum", label_sum);
-        let label_sum_hash = self.poseidon(vec![label_sum]);
-        self.label_sum_hash = Some(label_sum_hash.clone());
-        label_sum_hash
+            };
+
+            println!("{:?} label_sum", label_sum);
+            let label_sum_hash = self.poseidon(vec![label_sum]);
+            label_sum_hashes.push(label_sum_hash);
+        } 
+
+        self.label_sum_hashes = Some(label_sum_hashes.clone());
+        label_sum_hashes
     }
 
     // create chunks of plaintext where each chunk consists of 16 field elements.
@@ -131,6 +143,7 @@ impl LsumProver {
         let useful_bits = self.useful_bits.unwrap();
         // the size of a chunk of plaintext not counting the salt
         let chunk_size = useful_bits * 16 - 128;
+        self.chunk_size = Some(chunk_size);
 
         //let chunk_size = useful_bits * 16;
         // plaintext converted into bits
@@ -193,10 +206,11 @@ impl LsumProver {
 
     // hashes each chunk with Poseidon and returns digests for each chunk
     fn hash_chunks(&mut self, chunks: Vec<[BigUint; 16]>) -> Vec<BigUint> {
-        return chunks
+        let res: Vec<BigUint> = chunks
             .iter()
             .map(|chunk| self.poseidon(chunk.to_vec()))
             .collect();
+        res
     }
 
     // hash the inputs with circomlibjs's Poseidon
@@ -219,16 +233,16 @@ impl LsumProver {
         let output = &output.stdout[0..output.stdout.len() - 1];
         let s = String::from_utf8(output.to_vec()).unwrap();
         let bi = s.parse::<BigUint>().unwrap();
-        println!("poseidon output {:?}", bi);
+        //println!("poseidon output {:?}", bi);
         bi
     }
 
     pub fn create_zk_proof(
         &mut self,
-        zero_sum: BigUint,
+        zero_sum: Vec<BigUint>,
         deltas: Vec<BigUint>,
-    ) -> Result<Vec<u8>, Error> {
-        let label_sum_hash = self.label_sum_hash.as_ref().unwrap().clone();
+    ) -> Result<Vec<Vec<u8>>, Error> {
+        let label_sum_hashes = self.label_sum_hashes.as_ref().unwrap().clone();
 
         // the last chunk will be padded with zero plaintext. We also should pad
         // the deltas of the last chunk
@@ -243,54 +257,66 @@ impl LsumProver {
         padded_deltas.extend(deltas);
         padded_deltas.extend(padding);
 
-        // write inputs into input.json
-        let pt_str: Vec<String> = self.chunks.as_ref().unwrap()[0]
-            .to_vec()
-            .iter()
-            .map(|bigint| bigint.to_string())
-            .collect();
-        // For now dealing with one chunk only
-        let mut deltas_chunk: Vec<Vec<BigUint>> = Vec::with_capacity(16);
-        for i in 0..15 {
-            deltas_chunk.push(padded_deltas[i * 253..(i + 1) * 253].to_vec());
+        // we will have as many proofs as there are chunks of plaintext
+        let chunk_count = self.chunks.as_ref().unwrap().len();
+
+        let mut proofs: Vec<Vec<u8>> = Vec::with_capacity(chunk_count);
+
+        for count in 0..chunk_count {
+            // write inputs into input.json
+            let pt_str: Vec<String> = self.chunks.as_ref().unwrap()[count]
+                .to_vec()
+                .iter()
+                .map(|bigint| bigint.to_string())
+                .collect();
+            // For now dealing with one chunk only
+            let mut deltas_chunk: Vec<Vec<BigUint>> = Vec::with_capacity(16);
+            for i in 0..15 {
+                deltas_chunk.push(
+                    padded_deltas[count * chunk_size + i * 253..count * chunk_size + (i + 1) * 253]
+                        .to_vec(),
+                );
+            }
+
+            // There are as many deltas as there are bits in the plaintext
+            let delta_str: Vec<Vec<String>> = deltas_chunk
+                .iter()
+                .map(|v| v.iter().map(|b| b.to_string()).collect())
+                .collect();
+            let delta_last =
+                &padded_deltas[count * chunk_size + 15 * 253..count * chunk_size + 16 * 253 - 128];
+            let delta_last_str: Vec<String> = delta_last.iter().map(|v| v.to_string()).collect();
+
+            let mut data = object! {
+                plaintext_hash: self.hashes_of_chunks.as_ref().unwrap()[count].to_string(),
+                label_sum_hash: label_sum_hashes[count].to_string(),
+                sum_of_zero_labels: zero_sum[count].to_string(),
+                plaintext: pt_str,
+                delta: delta_str,
+                delta_last: delta_last_str
+            };
+            let s = stringify_pretty(data, 4);
+
+            let mut path1 = temp_dir();
+            let mut path2 = temp_dir();
+            path1.push(format!("input.json.{}", Uuid::new_v4()));
+            path2.push(format!("proof.json.{}", Uuid::new_v4()));
+
+            fs::write(path1.clone(), s).expect("Unable to write file");
+            let output = Command::new("node")
+                .args([
+                    "prove.mjs",
+                    path1.to_str().unwrap(),
+                    path2.to_str().unwrap(),
+                ])
+                .output();
+            fs::remove_file(path1);
+            check_output(output)?;
+            let proof = fs::read(path2.clone()).unwrap();
+            fs::remove_file(path2);
+            proofs.push(proof);
         }
-
-        // There are as many deltas as there are bits in the plaintext
-        let delta_str: Vec<Vec<String>> = deltas_chunk
-            .iter()
-            .map(|v| v.iter().map(|b| b.to_string()).collect())
-            .collect();
-        let delta_last = &padded_deltas[15 * 253..16 * 253 - 128];
-        let delta_last_str: Vec<String> = delta_last.iter().map(|v| v.to_string()).collect();
-
-        let mut data = object! {
-            plaintext_hash: self.hashes_of_chunks.as_ref().unwrap()[0].to_string(),
-            label_sum_hash: label_sum_hash.to_string(),
-            sum_of_zero_labels: zero_sum.to_string(),
-            plaintext: pt_str,
-            delta: delta_str,
-            delta_last: delta_last_str
-        };
-        let s = stringify_pretty(data, 4);
-
-        let mut path1 = temp_dir();
-        let mut path2 = temp_dir();
-        path1.push(format!("input.json.{}", Uuid::new_v4()));
-        path2.push(format!("proof.json.{}", Uuid::new_v4()));
-
-        fs::write(path1.clone(), s).expect("Unable to write file");
-        let output = Command::new("node")
-            .args([
-                "prove.mjs",
-                path1.to_str().unwrap(),
-                path2.to_str().unwrap(),
-            ])
-            .output();
-        fs::remove_file(path1);
-        check_output(output)?;
-        let proof = fs::read(path2.clone()).unwrap();
-        fs::remove_file(path2);
-        Ok(proof)
+        Ok(proofs)
     }
 }
 

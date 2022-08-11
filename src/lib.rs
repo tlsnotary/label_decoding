@@ -53,7 +53,7 @@ mod tests {
         ots.setup().unwrap();
 
         // random 490 byte plaintext. This is the size of one chunk.
-        // Our Poseidon is 16-arity * 253 bits each - 128 bits (salt) == 490 bytes
+        // Our Poseidon is 16-width * 253 bits each - 128 bits (salt) == 490 bytes
         let mut plaintext = [0u8; 512];
         rng.fill(&mut plaintext);
         let plaintext = &plaintext[0..320];
@@ -87,15 +87,15 @@ mod tests {
         let cipheretexts = verifier.receive_pt_hashes(plaintext_hash);
         // Verifier sends back encrypted arithm. labels.
 
-        let label_sum_hash = prover.compute_label_sum(&cipheretexts, &prover_labels);
+        let label_sum_hashes = prover.compute_label_sum(&cipheretexts, &prover_labels);
         // Hash commitment to the label_sum is sent to the Notary
 
-        let (deltas, zero_sum) = verifier.receive_labelsum_hash(label_sum_hash);
+        let (deltas, zero_sums) = verifier.receive_labelsum_hash(label_sum_hashes);
         // Notary sends zero_sum and all deltas
         // Prover constructs input to snarkjs
-        let proof = prover.create_zk_proof(zero_sum, deltas).unwrap();
+        let proofs = prover.create_zk_proof(zero_sums, deltas).unwrap();
 
         // Verifier verifies the proof
-        assert_eq!(verifier.verify(proof).unwrap(), true);
+        assert_eq!(verifier.verify(proofs).unwrap(), true);
     }
 }
