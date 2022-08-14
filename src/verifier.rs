@@ -1,4 +1,3 @@
-use super::to_16_bytes;
 use aes::{Aes128, NewBlockCipher};
 use cipher::{consts::U16, generic_array::GenericArray, BlockCipher, BlockEncrypt};
 use json::{array, object, stringify, stringify_pretty, JsonValue};

@@ -1,3 +1,6 @@
+use prover::ProverError;
+use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
+
 pub mod onetimesetup;
 pub mod prover;
 pub mod verifier;
@@ -7,12 +10,17 @@ pub mod verifier;
 const BN254_PRIME: &str =
     "21888242871839275222246405745257275088548364400416034343698204186575808495617";
 
-fn to_16_bytes(b: &[u8]) -> [u8; 16] {
-    let mut bytes = [0u8; 16];
-    // leave high zero bytes untouched
-    bytes[16 - b.len()..].copy_from_slice(b);
-    bytes
+
+// ProverCore must be implemented by the nodejs and wasm backends
+pub trait ProverCore {
+    fn set_proving_key(&mut self, key: Vec<u8>) -> Result<(), ProverError>;
+
+    fn poseidon(&mut self, inputs: Vec<BigUint>) -> BigUint;
+
+    fn prove(&mut self, input: String) -> Result<Vec<u8>, ProverError>;
 }
+
+
 
 #[cfg(test)]
 mod tests {

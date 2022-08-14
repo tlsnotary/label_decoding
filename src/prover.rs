@@ -1,41 +1,45 @@
 use aes::{Aes128, BlockDecrypt, NewBlockCipher};
 use cipher::{consts::U16, generic_array::GenericArray, BlockCipher, BlockEncrypt};
-use json::{object, stringify, stringify_pretty};
-use num::bigint::ToBigUint;
+use json::{object, stringify_pretty};
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
 use rand::{thread_rng, Rng};
 use std::env::temp_dir;
 use std::fs;
 use std::process::{Command, Output};
-use std::str;
 use uuid::Uuid;
 
 #[derive(Debug)]
-pub enum Error {
+pub enum ProverError {
     ProvingKeyNotFound,
     FileSystemError,
     FileDoesNotExist,
     SnarkjsError,
 }
 
+use crate::ProverCore;
+
 use super::BN254_PRIME;
 
-fn check_output(output: Result<Output, std::io::Error>) -> Result<(), Error> {
+fn check_output(output: Result<Output, std::io::Error>) -> Result<(), ProverError> {
     if output.is_err() {
-        return Err(Error::SnarkjsError);
+        return Err(ProverError::SnarkjsError);
     }
     if !output.unwrap().status.success() {
-        return Err(Error::SnarkjsError);
+        return Err(ProverError::SnarkjsError);
     }
     Ok(())
 }
+
 // implementation of the Prover in the "label_sum" protocol (aka the User).
 pub struct LsumProver {
+    // bytes of the plaintext which was obtained from the garbled circuit
     plaintext: Option<Vec<u8>>,
     // the prime of the field in which Poseidon hash will be computed.
     field_prime: BigUint,
     // how many bits to pack into one field element
     useful_bits: Option<usize>,
+    // the size of one chunk == useful_bits * Poseidon_width - 128 (salt size)
+    chunk_size: Option<usize>,
     // We will compute a separate Poseidon hash on each chunk of the plaintext.
     // Each chunk contains 16 field elements.
     chunks: Option<Vec<[BigUint; 16]>>,
@@ -47,7 +51,62 @@ pub struct LsumProver {
     salts: Option<Vec<BigUint>>,
     // hash of all our arithmetic labels
     label_sum_hashes: Option<Vec<BigUint>>,
-    chunk_size: Option<usize>,
+}
+
+impl ProverCore for LsumProver {
+    fn set_proving_key(&mut self, key: Vec<u8>) -> Result<(), ProverError> {
+        let res = fs::write("circuit_final.zkey.verifier", key);
+        if res.is_err() {
+            return Err(ProverError::FileSystemError);
+        }
+        Ok(())
+    }
+
+     // hash the inputs with circomlibjs's Poseidon
+    fn poseidon(&mut self, inputs: Vec<BigUint>) -> BigUint {
+        // convert field elements into escaped strings
+        let strchunks: Vec<String> = inputs
+            .iter()
+            .map(|fe| String::from("\"") + &fe.to_string() + &String::from("\""))
+            .collect();
+        // convert to JSON array
+        let json = String::from("[") + &strchunks.join(", ") + &String::from("]");
+        println!("json {:?}", json);
+
+        let output = Command::new("node")
+            .args(["poseidon.mjs", &json])
+            .output()
+            .unwrap();
+        println!("{:?}", output);
+        // drop the trailing new line
+        let output = &output.stdout[0..output.stdout.len() - 1];
+        let s = String::from_utf8(output.to_vec()).unwrap();
+        let bi = s.parse::<BigUint>().unwrap();
+        //println!("poseidon output {:?}", bi);
+        bi
+    }
+
+    fn prove(&mut self, input: String) -> Result<Vec<u8>, ProverError>{
+        let mut path1 = temp_dir();
+        let mut path2 = temp_dir();
+        path1.push(format!("input.json.{}", Uuid::new_v4()));
+        path2.push(format!("proof.json.{}", Uuid::new_v4()));
+
+        fs::write(path1.clone(), input).expect("Unable to write file");
+        let output = Command::new("node")
+            .args([
+                "prove.mjs",
+                path1.to_str().unwrap(),
+                path2.to_str().unwrap(),
+            ])
+            .output();
+        fs::remove_file(path1).expect("Unable to remove file");
+        check_output(output)?;
+        let proof = fs::read(path2.clone()).unwrap();
+        fs::remove_file(path2).expect("Unable to remove file");
+        Ok(proof)
+    }
+
 }
 
 impl LsumProver {
@@ -55,7 +114,7 @@ impl LsumProver {
         if field_prime.bits() < 129 {
             // last field element must be large enough to contain the 128-bit
             // salt. In the future, if we need to support fields < 129 bits,
-            // we can split the salt between multiple field elements.
+            // we can put the salt into multiple field elements.
             panic!("Error: expected a prime >= 129 bits");
         }
         Self {
@@ -70,13 +129,7 @@ impl LsumProver {
         }
     }
 
-    pub fn set_proving_key(&mut self, key: Vec<u8>) -> Result<(), Error> {
-        let res = fs::write("circuit_final.zkey.verifier", key);
-        if res.is_err() {
-            return Err(Error::FileSystemError);
-        }
-        Ok(())
-    }
+   
 
     // Return hash digests which is Prover's commitment to the plaintext
     pub fn setup(&mut self, plaintext: Vec<u8>) -> Vec<BigUint> {
@@ -205,35 +258,13 @@ impl LsumProver {
         res
     }
 
-    // hash the inputs with circomlibjs's Poseidon
-    pub fn poseidon(&mut self, inputs: Vec<BigUint>) -> BigUint {
-        // convert field elements into escaped strings
-        let strchunks: Vec<String> = inputs
-            .iter()
-            .map(|fe| String::from("\"") + &fe.to_string() + &String::from("\""))
-            .collect();
-        // convert to JSON array
-        let json = String::from("[") + &strchunks.join(", ") + &String::from("]");
-        println!("json {:?}", json);
-
-        let output = Command::new("node")
-            .args(["poseidon.mjs", &json])
-            .output()
-            .unwrap();
-        println!("{:?}", output);
-        // drop the trailing new line
-        let output = &output.stdout[0..output.stdout.len() - 1];
-        let s = String::from_utf8(output.to_vec()).unwrap();
-        let bi = s.parse::<BigUint>().unwrap();
-        //println!("poseidon output {:?}", bi);
-        bi
-    }
+   
 
     pub fn create_zk_proof(
         &mut self,
         zero_sum: Vec<BigUint>,
         mut deltas: Vec<BigUint>,
-    ) -> Result<Vec<Vec<u8>>, Error> {
+    ) -> Result<Vec<Vec<u8>>, ProverError> {
         let label_sum_hashes = self.label_sum_hashes.as_ref().unwrap().clone();
 
         // the last chunk will be padded with zero plaintext. We also should pad
@@ -280,28 +311,13 @@ impl LsumProver {
                 delta_last: deltas_fes[15]
             };
             let s = stringify_pretty(data, 4);
-
-            let mut path1 = temp_dir();
-            let mut path2 = temp_dir();
-            path1.push(format!("input.json.{}", Uuid::new_v4()));
-            path2.push(format!("proof.json.{}", Uuid::new_v4()));
-
-            fs::write(path1.clone(), s).expect("Unable to write file");
-            let output = Command::new("node")
-                .args([
-                    "prove.mjs",
-                    path1.to_str().unwrap(),
-                    path2.to_str().unwrap(),
-                ])
-                .output();
-            fs::remove_file(path1);
-            check_output(output)?;
-            let proof = fs::read(path2.clone()).unwrap();
-            fs::remove_file(path2);
-            proofs.push(proof);
+            proofs.push(self.prove(s).unwrap());
         }
         Ok(proofs)
     }
+
+    
+
 }
 
 /// Calculates how many bits of plaintext we will pack into one field element.
