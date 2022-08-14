@@ -24,7 +24,7 @@ mod tests {
     use super::*;
     use num::{BigUint, FromPrimitive};
     use prover::LsumProver;
-    use rand::{thread_rng, Rng};
+    use rand::{thread_rng, Rng, RngCore};
     use verifier::LsumVerifier;
 
     fn random_bigint(bitsize: usize) -> BigUint {
@@ -52,11 +52,12 @@ mod tests {
         let mut ots = OneTimeSetup::new();
         ots.setup().unwrap();
 
-        // random 490 byte plaintext. This is the size of one chunk.
-        // Our Poseidon is 16-width * 253 bits each - 128 bits (salt) == 490 bytes
-        let mut plaintext = [0u8; 1024];
-        rng.fill(&mut plaintext);
-        let plaintext = &plaintext[0..980];
+        // Our Poseidon is 16-width, so one permutation processes:
+        // 16 * 253 - 128 bits (salt) == 490 bytes. This is the size of the chunk.
+
+        // generate random plaintext of random size in range (0, 2000)
+        let mut plaintext = vec![0u8; rng.gen_range(0..2000)];
+        rng.fill_bytes(&mut plaintext);
 
         // Normally, the Prover is expected to obtain her binary labels by
         // evaluating the garbled circuit.

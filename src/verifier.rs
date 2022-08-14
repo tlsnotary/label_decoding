@@ -117,7 +117,6 @@ impl LsumVerifier {
         self.zero_sums = Some(zero_sums);
         self.deltas = Some(deltas);
 
-        // flatten all arithmetic labels
         // encrypt each arithmetic label using a corresponding binary label as a key
         // place ciphertexts in an order based on binary label's p&p bit
         let ciphertexts: Vec<[Vec<u8>; 2]> = labels
@@ -128,10 +127,9 @@ impl LsumVerifier {
                 let one_key = Aes128::new_from_slice(&bin_pair[1].to_be_bytes()).unwrap();
                 let mut label0 = [0u8; 16];
                 let mut label1 = [0u8; 16];
-                //println!("{:?}", arithm_pair[0].to_bytes_be());
-                //println!("{:?}", arithm_pair[1].to_bytes_be());
                 let ap0 = arithm_pair[0].to_bytes_be();
                 let ap1 = arithm_pair[1].to_bytes_be();
+                // need to zero-pad on the left
                 label0[16 - ap0.len()..].copy_from_slice(&ap0);
                 label1[16 - ap1.len()..].copy_from_slice(&ap1);
                 let mut label0: GenericArray<u8, U16> = GenericArray::from(label0);
@@ -141,7 +139,7 @@ impl LsumVerifier {
                 // ciphertext 0 and ciphertext 1
                 let ct0 = label0.to_vec();
                 let ct1 = label1.to_vec();
-                // get point and permute bit of binary label 0
+                // place ar. labels based on the point and permute bit of bin. label 0
                 if (bin_pair[0] & 1) == 0 {
                     [ct0, ct1]
                 } else {
@@ -159,7 +157,7 @@ impl LsumVerifier {
     }
 
     // receive the hash commitment to the Prover's sum of labels and reveal all
-    // deltas and zero_sum.
+    // deltas and zero_sums.
     pub fn receive_labelsum_hash(&mut self, hashes: Vec<BigUint>) -> (Vec<BigUint>, Vec<BigUint>) {
         self.labelsum_hashes = Some(hashes);
         (
@@ -210,6 +208,7 @@ impl LsumVerifier {
             public_json.push(self.zero_sums.as_ref().unwrap()[count].clone().to_string());
             let s = stringify(JsonValue::from(public_json.clone()));
 
+            // write into temp files and delete the files after verification
             let mut path1 = temp_dir();
             let mut path2 = temp_dir();
             path1.push(format!("public.json.{}", Uuid::new_v4()));
@@ -224,8 +223,9 @@ impl LsumVerifier {
                     path2.to_str().unwrap(),
                 ])
                 .output();
-            fs::remove_file(path1);
-            fs::remove_file(path2);
+            fs::remove_file(path1).expect("Unable to remove file");
+            fs::remove_file(path2).expect("Unable to remove file");
+
             check_output(&output)?;
             if !output.unwrap().status.success() {
                 return Ok(false);
