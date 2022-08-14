@@ -86,8 +86,9 @@ impl LsumProver {
         let (chunks, salts) = self.plaintext_to_chunks();
         self.chunks = Some(chunks.clone());
         self.salts = Some(salts);
-        self.hashes_of_chunks = Some(self.hash_chunks(chunks));
-        self.hashes_of_chunks.as_ref().unwrap().to_vec()
+        let hashes = self.hash_chunks(chunks);
+        self.hashes_of_chunks = Some(hashes.clone());
+        hashes
     }
 
     // decrypt each encrypted arithm.label based on the p&p bit of our active
@@ -107,7 +108,7 @@ impl LsumProver {
 
         let ct_iter = ciphertexts.chunks(self.chunk_size.unwrap());
         let lb_iter = labels.chunks(self.chunk_size.unwrap());
-        // process a pair of chunks of ciphertexts and corresponding labels at a time
+        // process a pair (chunk of ciphertexts, chunk of corresponding labels) at a time
         for (chunk_ct, chunk_lb) in ct_iter.zip(lb_iter){
             // accumulate the label sum here
             let mut label_sum = BigUint::from_u8(0).unwrap();
@@ -127,8 +128,7 @@ impl LsumProver {
             };
 
             println!("{:?} label_sum", label_sum);
-            let label_sum_hash = self.poseidon(vec![label_sum]);
-            label_sum_hashes.push(label_sum_hash);
+            label_sum_hashes.push(self.poseidon(vec![label_sum]));
         } 
 
         self.label_sum_hashes = Some(label_sum_hashes.clone());
@@ -145,18 +145,17 @@ impl LsumProver {
         let chunk_size = useful_bits * 16 - 128;
         self.chunk_size = Some(chunk_size);
 
-        //let chunk_size = useful_bits * 16;
         // plaintext converted into bits
         let mut bits = u8vec_to_boolvec(&self.plaintext.as_ref().unwrap());
         // chunk count (rounded up)
         let chunk_count = (bits.len() + (chunk_size - 1)) / chunk_size;
-        // extend bits with zeroes to fill the chunk
+        // extend bits with zeroes to fill the last chunk
         bits.extend(vec![false; chunk_count * chunk_size - bits.len()]);
         let mut chunks: Vec<[BigUint; 16]> = Vec::with_capacity(chunk_count);
         let mut salts: Vec<BigUint> = Vec::with_capacity(chunk_count);
-        // current offset within bits
-        let mut offset: usize = 0;
-        for _ in 0..chunk_count {
+
+        let mut rng = thread_rng();
+        for chunk_of_bits in bits.chunks(chunk_size) {
             // [BigUint::default(); 16] won't work since BigUint doesn't
             // implement the Copy trait, so typing out all values
             let mut chunk = [
@@ -178,27 +177,20 @@ impl LsumProver {
                 BigUint::default(),
             ];
 
-            for j in 0..15 {
-                // convert bits into field element
-                chunk[j] =
-                    BigUint::from_bytes_be(&boolvec_to_u8vec(&bits[offset..offset + useful_bits]));
-                offset += useful_bits;
+            // split chunk into 16 field elements
+            for (i, fe_bits) in chunk_of_bits.chunks(useful_bits).enumerate(){
+                if i < 15 {
+                    chunk[i] = BigUint::from_bytes_be(&boolvec_to_u8vec(&fe_bits));
+                }
+                else {
+                    // last field element's last 128 bits are for the salt
+                    let salt = rng.gen::<[u8;16]>();
+                    salts.push(BigUint::from_bytes_be(&salt));
+                    let mut bits_and_salt = fe_bits.to_vec();
+                    bits_and_salt.extend(u8vec_to_boolvec(&salt).iter());
+                    chunk[15] = BigUint::from_bytes_be(&boolvec_to_u8vec(&bits_and_salt));
+                };
             }
-
-            // last field element's last 128 bits are for the salt
-            let mut rng = thread_rng();
-            let salt: [u8; 16] = rng.gen();
-            let salt = u8vec_to_boolvec(&salt);
-
-            let mut last_fe = vec![false; useful_bits];
-            last_fe[0..useful_bits - 128]
-                .copy_from_slice(&bits[offset..offset + (useful_bits - 128)]);
-            offset += useful_bits - 128;
-            last_fe[useful_bits - 128..].copy_from_slice(&salt);
-            chunk[15] = BigUint::from_bytes_be(&boolvec_to_u8vec(&last_fe));
-
-            let salt = BigUint::from_bytes_be(&boolvec_to_u8vec(&salt));
-            salts.push(salt);
             chunks.push(chunk);
         }
         (chunks, salts)
@@ -240,7 +232,7 @@ impl LsumProver {
     pub fn create_zk_proof(
         &mut self,
         zero_sum: Vec<BigUint>,
-        deltas: Vec<BigUint>,
+        mut deltas: Vec<BigUint>,
     ) -> Result<Vec<Vec<u8>>, Error> {
         let label_sum_hashes = self.label_sum_hashes.as_ref().unwrap().clone();
 
@@ -249,51 +241,43 @@ impl LsumProver {
         let useful_bits = self.useful_bits.unwrap();
         // the size of a chunk of plaintext not counting the salt
         let chunk_size = useful_bits * 16 - 128;
-        let rem = deltas.len() % chunk_size;
-        // amount of 0 deltas we need to add to the public inputs of the proof
-        let delta_pad_count = if rem == 0 { 0 } else { chunk_size - rem };
-        let padding: Vec<BigUint> = vec![BigUint::from_u8(0).unwrap(); delta_pad_count];
-        let mut padded_deltas: Vec<BigUint> = Vec::with_capacity(chunk_size * 16);
-        padded_deltas.extend(deltas);
-        padded_deltas.extend(padding);
-
-        // we will have as many proofs as there are chunks of plaintext
         let chunk_count = self.chunks.as_ref().unwrap().len();
 
+        // pad deltas with 0 values to make their count a multiple of a chunk size
+        let delta_pad_count = chunk_size * chunk_count - deltas.len();
+        deltas.extend(vec![BigUint::from_u8(0).unwrap(); delta_pad_count]);
+
+
+        // we will have as many proofs as there are chunks of plaintext
         let mut proofs: Vec<Vec<u8>> = Vec::with_capacity(chunk_count);
+        let deltas_chunks: Vec<&[BigUint]> = deltas.chunks(chunk_size).collect();
 
         for count in 0..chunk_count {
-            // write inputs into input.json
+            // convert plaintext to string
             let pt_str: Vec<String> = self.chunks.as_ref().unwrap()[count]
                 .to_vec()
                 .iter()
                 .map(|bigint| bigint.to_string())
                 .collect();
-            // For now dealing with one chunk only
-            let mut deltas_chunk: Vec<Vec<BigUint>> = Vec::with_capacity(16);
-            for i in 0..15 {
-                deltas_chunk.push(
-                    padded_deltas[count * chunk_size + i * 253..count * chunk_size + (i + 1) * 253]
-                        .to_vec(),
-                );
-            }
 
-            // There are as many deltas as there are bits in the plaintext
-            let delta_str: Vec<Vec<String>> = deltas_chunk
-                .iter()
-                .map(|v| v.iter().map(|b| b.to_string()).collect())
-                .collect();
-            let delta_last =
-                &padded_deltas[count * chunk_size + 15 * 253..count * chunk_size + 16 * 253 - 128];
-            let delta_last_str: Vec<String> = delta_last.iter().map(|v| v.to_string()).collect();
+            // convert all deltas to strings
+            let deltas_str: Vec<String> = deltas_chunks[count]
+            .iter()
+            .map(|v| v.to_string())
+            .collect();
+            
+            // split deltas into 16 groups corresponding to 16 field elements 
+            let deltas_fes: Vec<&[String]> = deltas_str.chunks(useful_bits).collect();
 
+            // prepare input.json
             let mut data = object! {
                 plaintext_hash: self.hashes_of_chunks.as_ref().unwrap()[count].to_string(),
                 label_sum_hash: label_sum_hashes[count].to_string(),
                 sum_of_zero_labels: zero_sum[count].to_string(),
                 plaintext: pt_str,
-                delta: delta_str,
-                delta_last: delta_last_str
+                // first 15 fes form a separate input
+                delta: deltas_fes[0..15],
+                delta_last: deltas_fes[15]
             };
             let s = stringify_pretty(data, 4);
 

@@ -54,9 +54,9 @@ mod tests {
 
         // random 490 byte plaintext. This is the size of one chunk.
         // Our Poseidon is 16-width * 253 bits each - 128 bits (salt) == 490 bytes
-        let mut plaintext = [0u8; 512];
+        let mut plaintext = [0u8; 1024];
         rng.fill(&mut plaintext);
-        let plaintext = &plaintext[0..320];
+        let plaintext = &plaintext[0..980];
 
         // Normally, the Prover is expected to obtain her binary labels by
         // evaluating the garbled circuit.

@@ -27,5 +27,6 @@ async function main(retval){
 }
 
 main().then((retval) => {
+    console.log('verify.mjs exiting with ', retval);
     process.exit(retval);
 });
