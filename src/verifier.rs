@@ -9,20 +9,22 @@ use std::path::Path;
 use std::process::{Command, Output};
 use uuid::Uuid;
 
+use crate::VerifierCore;
+
 #[derive(Debug)]
-pub enum Error {
+pub enum VerifierError {
     ProvingKeyNotFound,
     FileSystemError,
     FileDoesNotExist,
     SnarkjsError,
 }
 
-fn check_output(output: &Result<Output, std::io::Error>) -> Result<(), Error> {
+fn check_output(output: &Result<Output, std::io::Error>) -> Result<(), VerifierError> {
     if output.is_err() {
-        return Err(Error::SnarkjsError);
+        return Err(VerifierError::SnarkjsError);
     }
     if !output.as_ref().unwrap().status.success() {
-        return Err(Error::SnarkjsError);
+        return Err(VerifierError::SnarkjsError);
     }
     Ok(())
 }
@@ -41,6 +43,60 @@ pub struct LsumVerifier {
     useful_bits: usize,
 }
 
+impl VerifierCore for LsumVerifier {
+    fn get_proving_key(&mut self) -> Result<Vec<u8>, VerifierError> {
+        if !Path::new("circuit_final.zkey.prover").exists() {
+            return Err(VerifierError::ProvingKeyNotFound);
+        }
+        let res = fs::read("circuit_final.zkey.prover");
+        if res.is_err() {
+            return Err(VerifierError::FileSystemError);
+        }
+        Ok(res.unwrap())
+    }
+
+    fn verify(
+        &mut self,
+        proof: Vec<u8>,
+        deltas: Vec<String>,
+        plaintext_hash: BigUint,
+        labelsum_hash: BigUint,
+        zero_sum: BigUint,
+    ) -> Result<bool, VerifierError> {
+        // public.json is a flat array
+        let mut public_json: Vec<String> = Vec::new();
+        public_json.push(plaintext_hash.to_string());
+        public_json.push(labelsum_hash.to_string());
+        public_json.extend::<Vec<String>>(deltas);
+        public_json.push(zero_sum.to_string());
+        let s = stringify(JsonValue::from(public_json.clone()));
+
+        // write into temp files and delete the files after verification
+        let mut path1 = temp_dir();
+        let mut path2 = temp_dir();
+        path1.push(format!("public.json.{}", Uuid::new_v4()));
+        path2.push(format!("proof.json.{}", Uuid::new_v4()));
+        fs::write(path1.clone(), s).expect("Unable to write file");
+        fs::write(path2.clone(), proof).expect("Unable to write file");
+
+        let output = Command::new("node")
+            .args([
+                "verify.mjs",
+                path1.to_str().unwrap(),
+                path2.to_str().unwrap(),
+            ])
+            .output();
+        fs::remove_file(path1).expect("Unable to remove file");
+        fs::remove_file(path2).expect("Unable to remove file");
+
+        check_output(&output)?;
+        if !output.unwrap().status.success() {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+}
+
 impl LsumVerifier {
     pub fn new(proving_key_needed: bool) -> Self {
         Self {
@@ -52,17 +108,6 @@ impl LsumVerifier {
             ciphertexts: None,
             useful_bits: 253,
         }
-    }
-
-    pub fn get_proving_key(&mut self) -> Result<Vec<u8>, Error> {
-        if !Path::new("circuit_final.zkey.prover").exists() {
-            return Err(Error::ProvingKeyNotFound);
-        }
-        let res = fs::read("circuit_final.zkey.prover");
-        if res.is_err() {
-            return Err(Error::FileSystemError);
-        }
-        Ok(res.unwrap())
     }
 
     // Convert binary labels into encrypted arithmetic labels.
@@ -165,7 +210,7 @@ impl LsumVerifier {
         )
     }
 
-    pub fn verify(&mut self, proofs: Vec<Vec<u8>>) -> Result<bool, Error> {
+    pub fn verify_many(&mut self, proofs: Vec<Vec<u8>>) -> Result<bool, VerifierError> {
         // // Write public.json. The elements must be written in the exact order
         // // as below, that's the order snarkjs expects them to be in.
 
@@ -186,47 +231,17 @@ impl LsumVerifier {
         for count in 0..chunk_count {
             // There are as many deltas as there are bits in the chunk of the
             // plaintext (not counting the salt)
-            let delta_str: Vec<String> = deltas_chunks[count]
-                .iter()
-                .map(|v| v.to_string())
-                .collect();
+            let delta_str: Vec<String> =
+                deltas_chunks[count].iter().map(|v| v.to_string()).collect();
 
-            // public.json is a flat array
-            let mut public_json: Vec<String> = Vec::new();
-            public_json.push(
-                self.plaintext_hashes.as_ref().unwrap()[count]
-                    .clone()
-                    .to_string(),
+            let res = self.verify(
+                proofs[count].clone(),
+                delta_str,
+                self.plaintext_hashes.as_ref().unwrap()[count].clone(),
+                self.labelsum_hashes.as_ref().unwrap()[count].clone(),
+                self.zero_sums.as_ref().unwrap()[count].clone(),
             );
-            public_json.push(
-                self.labelsum_hashes.as_ref().unwrap()[count]
-                    .clone()
-                    .to_string(),
-            );
-            public_json.extend::<Vec<String>>(delta_str);
-            public_json.push(self.zero_sums.as_ref().unwrap()[count].clone().to_string());
-            let s = stringify(JsonValue::from(public_json.clone()));
-
-            // write into temp files and delete the files after verification
-            let mut path1 = temp_dir();
-            let mut path2 = temp_dir();
-            path1.push(format!("public.json.{}", Uuid::new_v4()));
-            path2.push(format!("proof.json.{}", Uuid::new_v4()));
-            fs::write(path1.clone(), s).expect("Unable to write file");
-            fs::write(path2.clone(), proofs[count].clone()).expect("Unable to write file");
-
-            let output = Command::new("node")
-                .args([
-                    "verify.mjs",
-                    path1.to_str().unwrap(),
-                    path2.to_str().unwrap(),
-                ])
-                .output();
-            fs::remove_file(path1).expect("Unable to remove file");
-            fs::remove_file(path2).expect("Unable to remove file");
-
-            check_output(&output)?;
-            if !output.unwrap().status.success() {
+            if res.is_err() {
                 return Ok(false);
             }
         }

@@ -1,5 +1,6 @@
-use prover::ProverError;
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
+use prover::ProverError;
+use verifier::VerifierError;
 
 pub mod onetimesetup;
 pub mod prover;
@@ -10,7 +11,6 @@ pub mod verifier;
 const BN254_PRIME: &str =
     "21888242871839275222246405745257275088548364400416034343698204186575808495617";
 
-
 // ProverCore must be implemented by the nodejs and wasm backends
 pub trait ProverCore {
     fn set_proving_key(&mut self, key: Vec<u8>) -> Result<(), ProverError>;
@@ -20,7 +20,18 @@ pub trait ProverCore {
     fn prove(&mut self, input: String) -> Result<Vec<u8>, ProverError>;
 }
 
+pub trait VerifierCore {
+    fn get_proving_key(&mut self) -> Result<Vec<u8>, VerifierError>;
 
+    fn verify(
+        &mut self,
+        proof: Vec<u8>,
+        deltas: Vec<String>,
+        plaintext_hash: BigUint,
+        labelsum_hash: BigUint,
+        zero_sum: BigUint,
+    ) -> Result<bool, VerifierError>;
+}
 
 #[cfg(test)]
 mod tests {
@@ -105,6 +116,6 @@ mod tests {
         let proofs = prover.create_zk_proof(zero_sums, deltas).unwrap();
 
         // Verifier verifies the proof
-        assert_eq!(verifier.verify(proofs).unwrap(), true);
+        assert_eq!(verifier.verify_many(proofs).unwrap(), true);
     }
 }

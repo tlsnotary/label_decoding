@@ -62,7 +62,7 @@ impl ProverCore for LsumProver {
         Ok(())
     }
 
-     // hash the inputs with circomlibjs's Poseidon
+    // hash the inputs with circomlibjs's Poseidon
     fn poseidon(&mut self, inputs: Vec<BigUint>) -> BigUint {
         // convert field elements into escaped strings
         let strchunks: Vec<String> = inputs
@@ -86,7 +86,7 @@ impl ProverCore for LsumProver {
         bi
     }
 
-    fn prove(&mut self, input: String) -> Result<Vec<u8>, ProverError>{
+    fn prove(&mut self, input: String) -> Result<Vec<u8>, ProverError> {
         let mut path1 = temp_dir();
         let mut path2 = temp_dir();
         path1.push(format!("input.json.{}", Uuid::new_v4()));
@@ -106,7 +106,6 @@ impl ProverCore for LsumProver {
         fs::remove_file(path2).expect("Unable to remove file");
         Ok(proof)
     }
-
 }
 
 impl LsumProver {
@@ -128,8 +127,6 @@ impl LsumProver {
             chunk_size: None,
         }
     }
-
-   
 
     // Return hash digests which is Prover's commitment to the plaintext
     pub fn setup(&mut self, plaintext: Vec<u8>) -> Vec<BigUint> {
@@ -162,7 +159,7 @@ impl LsumProver {
         let ct_iter = ciphertexts.chunks(self.chunk_size.unwrap());
         let lb_iter = labels.chunks(self.chunk_size.unwrap());
         // process a pair (chunk of ciphertexts, chunk of corresponding labels) at a time
-        for (chunk_ct, chunk_lb) in ct_iter.zip(lb_iter){
+        for (chunk_ct, chunk_lb) in ct_iter.zip(lb_iter) {
             // accumulate the label sum here
             let mut label_sum = BigUint::from_u8(0).unwrap();
             for (ct_pair, label) in chunk_ct.iter().zip(chunk_lb) {
@@ -178,11 +175,11 @@ impl LsumProver {
                 key.decrypt_block(&mut ct);
                 // add the decrypted arithmetic label to the sum
                 label_sum += BigUint::from_bytes_be(&ct);
-            };
+            }
 
             println!("{:?} label_sum", label_sum);
             label_sum_hashes.push(self.poseidon(vec![label_sum]));
-        } 
+        }
 
         self.label_sum_hashes = Some(label_sum_hashes.clone());
         label_sum_hashes
@@ -231,13 +228,12 @@ impl LsumProver {
             ];
 
             // split chunk into 16 field elements
-            for (i, fe_bits) in chunk_of_bits.chunks(useful_bits).enumerate(){
+            for (i, fe_bits) in chunk_of_bits.chunks(useful_bits).enumerate() {
                 if i < 15 {
                     chunk[i] = BigUint::from_bytes_be(&boolvec_to_u8vec(&fe_bits));
-                }
-                else {
+                } else {
                     // last field element's last 128 bits are for the salt
-                    let salt = rng.gen::<[u8;16]>();
+                    let salt = rng.gen::<[u8; 16]>();
                     salts.push(BigUint::from_bytes_be(&salt));
                     let mut bits_and_salt = fe_bits.to_vec();
                     bits_and_salt.extend(u8vec_to_boolvec(&salt).iter());
@@ -258,8 +254,6 @@ impl LsumProver {
         res
     }
 
-   
-
     pub fn create_zk_proof(
         &mut self,
         zero_sum: Vec<BigUint>,
@@ -278,7 +272,6 @@ impl LsumProver {
         let delta_pad_count = chunk_size * chunk_count - deltas.len();
         deltas.extend(vec![BigUint::from_u8(0).unwrap(); delta_pad_count]);
 
-
         // we will have as many proofs as there are chunks of plaintext
         let mut proofs: Vec<Vec<u8>> = Vec::with_capacity(chunk_count);
         let deltas_chunks: Vec<&[BigUint]> = deltas.chunks(chunk_size).collect();
@@ -292,12 +285,10 @@ impl LsumProver {
                 .collect();
 
             // convert all deltas to strings
-            let deltas_str: Vec<String> = deltas_chunks[count]
-            .iter()
-            .map(|v| v.to_string())
-            .collect();
-            
-            // split deltas into 16 groups corresponding to 16 field elements 
+            let deltas_str: Vec<String> =
+                deltas_chunks[count].iter().map(|v| v.to_string()).collect();
+
+            // split deltas into 16 groups corresponding to 16 field elements
             let deltas_fes: Vec<&[String]> = deltas_str.chunks(useful_bits).collect();
 
             // prepare input.json
@@ -315,9 +306,6 @@ impl LsumProver {
         }
         Ok(proofs)
     }
-
-    
-
 }
 
 /// Calculates how many bits of plaintext we will pack into one field element.
