@@ -1,5 +1,5 @@
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
-use prover::ProverError;
+use prover::{ProverCore, ProverError};
 use verifier::VerifierError;
 
 pub mod onetimesetup;
@@ -11,13 +11,40 @@ pub mod verifier;
 const BN254_PRIME: &str =
     "21888242871839275222246405745257275088548364400416034343698204186575808495617";
 
-// ProverCore must be implemented by the nodejs and wasm backends
-pub trait ProverCore {
+// ProverVirtual describes virtual methods which must be implemented by the
+// nodejs and wasm implementors
+pub trait ProverVirtual {
     fn set_proving_key(&mut self, key: Vec<u8>) -> Result<(), ProverError>;
 
     fn poseidon(&mut self, inputs: Vec<BigUint>) -> BigUint;
 
     fn prove(&mut self, input: String) -> Result<Vec<u8>, ProverError>;
+}
+
+// provides default implementations for methods which must passthrough to the
+// LsumProverCore. Only get_core() must be implemented.
+pub trait ProverPassthrough {
+    fn setup(&mut self, plaintext: Vec<u8>) -> Vec<BigUint> {
+        self.get_core().setup(plaintext)
+    }
+
+    fn compute_label_sum(
+        &mut self,
+        ciphertexts: &Vec<[Vec<u8>; 2]>,
+        labels: &Vec<u128>,
+    ) -> Vec<BigUint> {
+        self.get_core().compute_label_sum(ciphertexts, labels)
+    }
+
+    fn create_zk_proof(
+        &mut self,
+        zero_sum: Vec<BigUint>,
+        mut deltas: Vec<BigUint>,
+    ) -> Result<Vec<Vec<u8>>, ProverError> {
+        self.get_core().create_zk_proof(zero_sum, deltas)
+    }
+
+    fn get_core(&mut self) -> &ProverCore<Box<Self>>;
 }
 
 pub trait VerifierCore {
@@ -42,7 +69,7 @@ mod tests {
 
     use super::*;
     use num::{BigUint, FromPrimitive};
-    use prover::LsumProver;
+    use prover::Prover;
     use rand::{thread_rng, Rng, RngCore};
     use verifier::LsumVerifier;
 
@@ -99,7 +126,7 @@ mod tests {
         // produce ciphertexts which are sent to Prover for decryption
         verifier.setup(&all_binary_labels);
 
-        let mut prover = LsumProver::new(prime);
+        let mut prover = Prover::new(prime);
         prover.set_proving_key(proving_key);
         let plaintext_hash = prover.setup(plaintext.to_vec());
 
