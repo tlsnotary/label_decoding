@@ -30,13 +30,13 @@ fn check_output(output: Result<Output, std::io::Error>) -> Result<(), ProverErro
     Ok(())
 }
 
-pub struct Prover<'a> {
-    core: ProverCore<&'a Prover>,
+pub struct Prover {
+    core: ProverCore<Box<Prover>>,
 }
 
 impl Prover {
     pub fn new(field_prime: BigUint) -> Self {
-        let core = ProverCore::new(field_prime, Self);
+        let core = ProverCore::new(field_prime);
         Self { core }
     }
 
@@ -107,7 +107,7 @@ impl ProverVirtual for Prover {
 }
 
 // implementation of the Prover in the "label_sum" protocol (aka the User).
-pub struct ProverCore<'a, T: 'a> {
+pub struct ProverCore<T> {
     // bytes of the plaintext which was obtained from the garbled circuit
     plaintext: Option<Vec<u8>>,
     // the prime of the field in which Poseidon hash will be computed.
@@ -126,11 +126,11 @@ pub struct ProverCore<'a, T: 'a> {
     salts: Option<Vec<BigUint>>,
     // hash of all our arithmetic labels
     label_sum_hashes: Option<Vec<BigUint>>,
-    caller: &'a T,
+    caller: Box<T>,
 }
 
 impl<T> ProverCore<T> {
-    pub fn new(field_prime: BigUint, caller: &T) -> Self {
+    pub fn new(field_prime: BigUint, caller: Box<T>) -> Self {
         if field_prime.bits() < 129 {
             // last field element must be large enough to contain the 128-bit
             // salt. In the future, if we need to support fields < 129 bits,
