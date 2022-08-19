@@ -1,0 +1,19 @@
+[package]
+name = "labelsum"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "labelsum"
+
+[dependencies]
+num = { version = "0.4"}
+rand = "0.8.5"
+json = "0.12.4"
+aes = { version = "0.7.5", features = [] }
+cipher = "0.3"
+uuid = { version = "0.8.1", features = ["serde", "v4"] }
+getset = "0.0.1"
+derive-macro = { path = "../derive-macro"}
