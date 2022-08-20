@@ -1,6 +1,5 @@
-use crate::prover::ProverGetSet;
+use crate::prover::ProverData;
 use crate::prover::{Prover, ProverError};
-use derive_macro::ProverGetSetM;
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
 use std::env::temp_dir;
 use std::fs;
@@ -43,44 +42,23 @@ impl ProverNode {
 }
 
 // implementation of the Prover using the node.js backend
-#[derive(ProverGetSetM)]
 pub struct ProverNodeInternal {
-    // bytes of the plaintext which was obtained from the garbled circuit
-    plaintext: Option<Vec<u8>>,
-    // the prime of the field in which Poseidon hash will be computed.
-    field_prime: Option<BigUint>,
-    // how many bits to pack into one field element
-    useful_bits: Option<usize>,
-    // the size of one chunk == useful_bits * Poseidon_width - 128 (salt size)
-    chunk_size: Option<usize>,
-    // We will compute a separate Poseidon hash on each chunk of the plaintext.
-    // Each chunk contains 16 field elements.
-    chunks: Option<Vec<[BigUint; 16]>>,
-    // Poseidon hashes of each chunk
-    hashes_of_chunks: Option<Vec<BigUint>>,
-    // each chunk's last 128 bits are used for the salt. w/o the salt, hashes
-    // of plaintext with low entropy could be brute-forced.
-    salts: Option<Vec<BigUint>>,
-    // hash of all our arithmetic labels
-    label_sum_hashes: Option<Vec<BigUint>>,
+    data: ProverData,
 }
 
 impl ProverNodeInternal {
     pub fn new() -> Self {
         Self {
-            plaintext: None,
-            field_prime: None,
-            useful_bits: None,
-            chunks: None,
-            salts: None,
-            hashes_of_chunks: None,
-            label_sum_hashes: None,
-            chunk_size: None,
+            data: ProverData::new(),
         }
     }
 }
 
 impl Prover for ProverNodeInternal {
+    fn data(&mut self) -> &mut ProverData {
+        &mut self.data
+    }
+
     fn set_proving_key(&mut self, key: Vec<u8>) -> Result<(), ProverError> {
         let res = fs::write("circuit_final.zkey.verifier", key);
         if res.is_err() {

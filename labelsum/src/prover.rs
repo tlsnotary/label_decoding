@@ -1,7 +1,6 @@
-use crate::provernode::ProverNode;
 use aes::{Aes128, BlockDecrypt, NewBlockCipher};
 use cipher::{consts::U16, generic_array::GenericArray, BlockCipher, BlockEncrypt};
-use getset::{Getters, Setters};
+use derive_macro::{define_accessors_trait, ProverDataGetSet};
 use json::{object, stringify_pretty};
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
 use rand::{thread_rng, Rng};
@@ -16,12 +15,12 @@ pub enum ProverError {
 
 use super::BN254_PRIME;
 
-// This is a template containing all the fields which must be present in the
-// implementor of `Prover`. It is here for convenience to be copy-pasted into
-// the implementor's struct.
-// The implementor must use #[derive(ProverGetSetM)]
-#[allow(dead_code)]
-pub struct ProverImplementorTemplate {
+// ProverData contains data common to all implementors of Prover.
+// We use a macro to define a trait with accessors and another macro
+// to implement those accessors.
+#[define_accessors_trait(ProverDataGetSet)]
+#[derive(ProverDataGetSet)]
+pub struct ProverData {
     // bytes of the plaintext which was obtained from the garbled circuit
     plaintext: Option<Vec<u8>>,
     // the prime of the field in which Poseidon hash will be computed.
@@ -41,10 +40,25 @@ pub struct ProverImplementorTemplate {
     // hash of all our arithmetic labels
     label_sum_hashes: Option<Vec<BigUint>>,
 }
+impl ProverData {
+    pub fn new() -> Self {
+        Self {
+            plaintext: None,
+            field_prime: None,
+            useful_bits: None,
+            chunk_size: None,
+            chunks: None,
+            hashes_of_chunks: None,
+            salts: None,
+            label_sum_hashes: None,
+        }
+    }
+}
 
-// `trait Prover` contains default implementation for most of the logic of the
-// prover in the "labelsum" label decoding protocol.
-pub trait Prover: ProverGetSet {
+/// `trait Prover` contains default implementation for most of the logic of the
+/// prover in the "labelsum" label decoding protocol.
+/// The implementor of Prover must wrap [ProverData]. The field MUST be called `data`
+pub trait Prover {
     // these methods must be implemented:
 
     fn set_proving_key(&mut self, key: Vec<u8>) -> Result<(), ProverError>;
@@ -52,6 +66,9 @@ pub trait Prover: ProverGetSet {
     fn poseidon(&mut self, inputs: Vec<BigUint>) -> BigUint;
 
     fn prove(&mut self, input: String) -> Result<Vec<u8>, ProverError>;
+
+    // return a reference to the `data` field
+    fn data(&mut self) -> &mut ProverData;
 
     // the rest of the methods have default implementations
 
@@ -63,16 +80,16 @@ pub trait Prover: ProverGetSet {
             // we can put the salt into multiple field elements.
             panic!("Error: expected a prime >= 129 bits");
         }
-        self.set_field_prime(Some(field_prime.clone()));
-        self.set_plaintext(Some(plaintext.clone()));
+        self.data().set_field_prime(Some(field_prime.clone()));
+        self.data().set_plaintext(Some(plaintext.clone()));
         let useful_bits = calculate_useful_bits(&field_prime);
-        self.set_useful_bits(Some(useful_bits));
+        self.data().set_useful_bits(Some(useful_bits));
         let (chunk_size, chunks, salts) = self.plaintext_to_chunks(useful_bits, plaintext);
-        self.set_chunks(Some(chunks.clone()));
-        self.set_salts(Some(salts));
-        self.set_chunk_size(Some(chunk_size));
+        self.data().set_chunks(Some(chunks.clone()));
+        self.data().set_salts(Some(salts));
+        self.data().set_chunk_size(Some(chunk_size));
         let hashes = self.hash_chunks(chunks);
-        self.set_hashes_of_chunks(Some(hashes.clone()));
+        self.data().set_hashes_of_chunks(Some(hashes.clone()));
         hashes
     }
 
@@ -87,12 +104,12 @@ pub trait Prover: ProverGetSet {
         // if binary label's p&p bit is 0, decrypt the 1st ciphertext,
         // otherwise decrypt the 2nd one.
         assert!(ciphertexts.len() == labels.len());
-        assert!(self.plaintext().as_ref().unwrap().len() * 8 == ciphertexts.len());
+        assert!(self.data().plaintext().as_ref().unwrap().len() * 8 == ciphertexts.len());
         let mut label_sum_hashes: Vec<BigUint> =
-            Vec::with_capacity(self.chunks().as_ref().unwrap().len());
+            Vec::with_capacity(self.data().chunks().as_ref().unwrap().len());
 
-        let ct_iter = ciphertexts.chunks(self.chunk_size().unwrap());
-        let lb_iter = labels.chunks(self.chunk_size().unwrap());
+        let ct_iter = ciphertexts.chunks(self.data().chunk_size().unwrap());
+        let lb_iter = labels.chunks(self.data().chunk_size().unwrap());
         // process a pair (chunk of ciphertexts, chunk of corresponding labels) at a time
         for (chunk_ct, chunk_lb) in ct_iter.zip(lb_iter) {
             // accumulate the label sum here
@@ -116,7 +133,8 @@ pub trait Prover: ProverGetSet {
             label_sum_hashes.push(self.poseidon(vec![label_sum]));
         }
 
-        self.set_label_sum_hashes(Some(label_sum_hashes.clone()));
+        self.data()
+            .set_label_sum_hashes(Some(label_sum_hashes.clone()));
         label_sum_hashes
     }
 
@@ -125,14 +143,14 @@ pub trait Prover: ProverGetSet {
         zero_sum: Vec<BigUint>,
         mut deltas: Vec<BigUint>,
     ) -> Result<Vec<Vec<u8>>, ProverError> {
-        let label_sum_hashes = self.label_sum_hashes().as_ref().unwrap().clone();
+        let label_sum_hashes = self.data().label_sum_hashes().as_ref().unwrap().clone();
 
         // the last chunk will be padded with zero plaintext. We also should pad
         // the deltas of the last chunk
-        let useful_bits = self.useful_bits().unwrap();
+        let useful_bits = self.data().useful_bits().unwrap();
         // the size of a chunk of plaintext not counting the salt
         let chunk_size = useful_bits * 16 - 128;
-        let chunk_count = self.chunks().as_ref().unwrap().len();
+        let chunk_count = self.data().chunks().as_ref().unwrap().len();
 
         // pad deltas with 0 values to make their count a multiple of a chunk size
         let delta_pad_count = chunk_size * chunk_count - deltas.len();
@@ -144,7 +162,7 @@ pub trait Prover: ProverGetSet {
 
         for count in 0..chunk_count {
             // convert plaintext to string
-            let pt_str: Vec<String> = self.chunks().as_ref().unwrap()[count]
+            let pt_str: Vec<String> = self.data().chunks().as_ref().unwrap()[count]
                 .to_vec()
                 .iter()
                 .map(|bigint| bigint.to_string())
@@ -159,7 +177,7 @@ pub trait Prover: ProverGetSet {
 
             // prepare input.json
             let mut data = object! {
-                plaintext_hash: self.hashes_of_chunks().as_ref().unwrap()[count].to_string(),
+                plaintext_hash: self.data().hashes_of_chunks().as_ref().unwrap()[count].to_string(),
                 label_sum_hash: label_sum_hashes[count].to_string(),
                 sum_of_zero_labels: zero_sum[count].to_string(),
                 plaintext: pt_str,
@@ -245,44 +263,6 @@ pub trait Prover: ProverGetSet {
     }
 }
 
-/// accessors for the fields defined in [`ProverImplementorTemplate`] which are
-/// auto-implemented when using #[derive(ProverGetSetM)]
-pub trait ProverGetSet {
-    // bytes of the plaintext which was obtained from the garbled circuit
-    fn plaintext(&self) -> &Option<Vec<u8>>;
-    fn set_plaintext(&mut self, new: Option<Vec<u8>>);
-
-    // the prime of the field in which Poseidon hash will be computed.
-    fn field_prime(&self) -> &Option<BigUint>;
-    fn set_field_prime(&mut self, new: Option<BigUint>);
-
-    // how many bits to pack into one field element
-    fn useful_bits(&self) -> &Option<usize>;
-    fn set_useful_bits(&mut self, new: Option<usize>);
-
-    // the size of one chunk == useful_bits * Poseidon_width - 128 (salt size)
-    fn chunk_size(&self) -> &Option<usize>;
-    fn set_chunk_size(&mut self, new: Option<usize>);
-
-    // We will compute a separate Poseidon hash on each chunk of the plaintext.
-    // Each chunk contains 16 field elements.
-    fn chunks(&self) -> &Option<Vec<[BigUint; 16]>>;
-    fn set_chunks(&mut self, new: Option<Vec<[BigUint; 16]>>);
-
-    // Poseidon hashes of each chunk
-    fn hashes_of_chunks(&self) -> &Option<Vec<BigUint>>;
-    fn set_hashes_of_chunks(&mut self, new: Option<Vec<BigUint>>);
-
-    //  each chunk's last 128 bits are used for the salt. w/o the salt, hashes
-    //  of plaintext with low entropy could be brute-forced.
-    fn salts(&self) -> &Option<Vec<BigUint>>;
-    fn set_salts(&mut self, new: Option<Vec<BigUint>>);
-
-    // hash of all our arithmetic labels
-    fn label_sum_hashes(&self) -> &Option<Vec<BigUint>>;
-    fn set_label_sum_hashes(&mut self, new: Option<Vec<BigUint>>);
-}
-
 /// Calculates how many bits of plaintext we will pack into one field element.
 /// Essentially, this is field_prime bit length minus 1.
 fn calculate_useful_bits(field_prime: &BigUint) -> usize {
@@ -331,6 +311,8 @@ pub fn boolvec_to_u8vec(bv: &[bool]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provernode::ProverNode;
+
     // #[test]
     //  TODO finish this test
     // fn test_plaintext_to_chunks() {

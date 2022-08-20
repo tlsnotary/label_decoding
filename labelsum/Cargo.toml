@@ -15,5 +15,4 @@ json = "0.12.4"
 aes = { version = "0.7.5", features = [] }
 cipher = "0.3"
 uuid = { version = "0.8.1", features = ["serde", "v4"] }
-getset = "0.0.1"
 derive-macro = { path = "../derive-macro"}

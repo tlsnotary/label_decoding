@@ -1,7 +1,4 @@
-use crate::verifier::VerifierGetSet;
-use crate::verifier::{Verifier, VerifierError};
-use derive_macro::ProverGetSetM;
-use derive_macro::VerifierGetSetM;
+use crate::verifier::{Verifier, VerifierData, VerifierError};
 use json::{array, object, stringify, stringify_pretty, JsonValue};
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
 use std::env::temp_dir;
@@ -15,8 +12,8 @@ pub struct VerifierNode {
     parent: VerifierNodeInternal,
 }
 impl VerifierNode {
-    pub fn new(flag: bool) -> Self {
-        let parent = VerifierNodeInternal::new(flag);
+    pub fn new(proving_key_needed: bool) -> Self {
+        let parent = VerifierNodeInternal::new(proving_key_needed);
         Self { parent }
     }
 
@@ -54,36 +51,23 @@ impl VerifierNode {
 }
 
 // implementation of the Verifier using the node.js backend
-#[derive(VerifierGetSetM)]
 pub struct VerifierNodeInternal {
-    // hashes for each chunk of Prover's plaintext
-    plaintext_hashes: Option<Vec<BigUint>>,
-    labelsum_hashes: Option<Vec<BigUint>>,
-    // if set to true, then we must send the proving key to the Prover
-    // before this protocol begins. Otherwise, it is assumed that the Prover
-    // already has the proving key from a previous interaction with us.
-    proving_key_needed: bool,
-    deltas: Option<Vec<BigUint>>,
-    zero_sums: Option<Vec<BigUint>>,
-    ciphertexts: Option<Vec<[Vec<u8>; 2]>>,
-    useful_bits: usize,
+    data: VerifierData,
 }
 
 impl VerifierNodeInternal {
     pub fn new(proving_key_needed: bool) -> Self {
         Self {
-            plaintext_hashes: None,
-            labelsum_hashes: None,
-            proving_key_needed,
-            deltas: None,
-            zero_sums: None,
-            ciphertexts: None,
-            useful_bits: 253,
+            data: VerifierData::new(proving_key_needed),
         }
     }
 }
 
 impl Verifier for VerifierNodeInternal {
+    fn data(&mut self) -> &mut VerifierData {
+        &mut self.data
+    }
+
     fn get_proving_key(&mut self) -> Result<Vec<u8>, VerifierError> {
         if !Path::new("circuit_final.zkey.prover").exists() {
             return Err(VerifierError::ProvingKeyNotFound);

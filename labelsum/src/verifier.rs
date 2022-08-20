@@ -1,15 +1,8 @@
 use aes::{Aes128, NewBlockCipher};
 use cipher::{consts::U16, generic_array::GenericArray, BlockCipher, BlockEncrypt};
-use json::{array, object, stringify, stringify_pretty, JsonValue};
+use derive_macro::{define_accessors_trait, VerifierDataGetSet};
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
 use rand::{thread_rng, Rng};
-use std::env::temp_dir;
-use std::fs;
-use std::path::Path;
-use std::process::{Command, Output};
-use uuid::Uuid;
-
-use crate::VerifierCore;
 
 #[derive(Debug)]
 pub enum VerifierError {
@@ -19,26 +12,40 @@ pub enum VerifierError {
     SnarkjsError,
 }
 
-// This is a template containing all the fields which must be present in the
-// implementor of `Verifier`. It is here for convenience to be copy-pasted into
-// the implementor's struct.
-// The implementor must also #[derive(VerifierGetSetM)]
-#[allow(dead_code)]
-pub struct VerfierImplementorTemplate {
+/// VerifierData contains fields common to all implementors of Verifier.
+/// The implementor of Verifier must wrap VerifierData.
+/// The field MUST be called `data`
+#[define_accessors_trait(VerifierDataGetSet)]
+#[derive(VerifierDataGetSet)]
+pub struct VerifierData {
     // hashes for each chunk of Prover's plaintext
     plaintext_hashes: Option<Vec<BigUint>>,
     labelsum_hashes: Option<Vec<BigUint>>,
     // if set to true, then we must send the proving key to the Prover
     // before this protocol begins. Otherwise, it is assumed that the Prover
     // already has the proving key from a previous interaction with us.
-    proving_key_needed: bool,
+    proving_key_needed: Option<bool>,
     deltas: Option<Vec<BigUint>>,
     zero_sums: Option<Vec<BigUint>>,
     ciphertexts: Option<Vec<[Vec<u8>; 2]>>,
-    useful_bits: usize,
+    useful_bits: Option<usize>,
+}
+impl VerifierData {
+    pub fn new(proving_key_needed: bool) -> Self {
+        Self {
+            plaintext_hashes: None,
+            labelsum_hashes: None,
+            proving_key_needed: Some(proving_key_needed),
+            deltas: None,
+            zero_sums: None,
+            ciphertexts: None,
+            useful_bits: Some(253),
+        }
+    }
 }
 
-pub trait Verifier: VerifierGetSet {
+/// The implementor of Verifier must wrap [VerifierData]. The field MUST be called `data`
+pub trait Verifier {
     // these methods must be implemented:
 
     fn get_proving_key(&mut self) -> Result<Vec<u8>, VerifierError>;
@@ -51,6 +58,9 @@ pub trait Verifier: VerifierGetSet {
         labelsum_hash: BigUint,
         zero_sum: BigUint,
     ) -> Result<bool, VerifierError>;
+
+    // return a reference to the `data` field
+    fn data(&mut self) -> &mut VerifierData;
 
     // the rest of the methods have default implementations
 
@@ -102,8 +112,8 @@ pub trait Verifier: VerifierGetSet {
             );
             zero_sums.push(zero_sum);
         }
-        self.set_zero_sums(Some(zero_sums));
-        self.set_deltas(Some(deltas));
+        self.data().set_zero_sums(Some(zero_sums));
+        self.data().set_deltas(Some(deltas));
 
         // encrypt each arithmetic label using a corresponding binary label as a key
         // place ciphertexts in an order based on binary label's p&p bit
@@ -135,22 +145,22 @@ pub trait Verifier: VerifierGetSet {
                 }
             })
             .collect();
-        self.set_ciphertexts(Some(ciphertexts));
+        self.data().set_ciphertexts(Some(ciphertexts));
     }
 
     // receive hashes of plaintext and reveal the encrypted arithmetic labels
     fn receive_pt_hashes(&mut self, hashes: Vec<BigUint>) -> Vec<[Vec<u8>; 2]> {
-        self.set_plaintext_hashes(Some(hashes));
-        self.ciphertexts().as_ref().unwrap().clone()
+        self.data().set_plaintext_hashes(Some(hashes));
+        self.data().ciphertexts().as_ref().unwrap().clone()
     }
 
     // receive the hash commitment to the Prover's sum of labels and reveal all
     // deltas and zero_sums.
     fn receive_labelsum_hash(&mut self, hashes: Vec<BigUint>) -> (Vec<BigUint>, Vec<BigUint>) {
-        self.set_labelsum_hashes(Some(hashes));
+        self.data().set_labelsum_hashes(Some(hashes));
         (
-            self.deltas().as_ref().unwrap().clone(),
-            self.zero_sums().as_ref().unwrap().clone(),
+            self.data().deltas().as_ref().unwrap().clone(),
+            self.data().zero_sums().as_ref().unwrap().clone(),
         )
     }
 
@@ -160,15 +170,17 @@ pub trait Verifier: VerifierGetSet {
 
         // the last chunk will be padded with zero plaintext. We also should pad
         // the deltas of the last chunk
-        let useful_bits = self.useful_bits();
+        let useful_bits = self.data().useful_bits().unwrap();
         // the size of a chunk of plaintext not counting the salt
         let chunk_size = useful_bits * 16 - 128;
-        let chunk_count = (self.deltas().as_ref().unwrap().len() + (chunk_size - 1)) / chunk_size;
+        let chunk_count =
+            (self.data().deltas().as_ref().unwrap().len() + (chunk_size - 1)) / chunk_size;
         assert!(proofs.len() == chunk_count);
 
-        let mut deltas = self.deltas().as_ref().unwrap().clone();
+        let mut deltas = self.data().deltas().as_ref().unwrap().clone();
         // pad deltas with 0 values to make their count a multiple of a chunk size
-        let delta_pad_count = chunk_size * chunk_count - self.deltas().as_ref().unwrap().len();
+        let delta_pad_count =
+            chunk_size * chunk_count - self.data().deltas().as_ref().unwrap().len();
         deltas.extend(vec![BigUint::from_u8(0).unwrap(); delta_pad_count]);
         let deltas_chunks: Vec<&[BigUint]> = deltas.chunks(chunk_size).collect();
 
@@ -178,12 +190,16 @@ pub trait Verifier: VerifierGetSet {
             let delta_str: Vec<String> =
                 deltas_chunks[count].iter().map(|v| v.to_string()).collect();
 
+            let plaintext_hash = self.data().plaintext_hashes().as_ref().unwrap()[count].clone();
+            let labelsum_hash = self.data().labelsum_hashes().as_ref().unwrap()[count].clone();
+            let zero_sum = self.data().zero_sums().as_ref().unwrap()[count].clone();
+
             let res = self.verify(
                 proofs[count].clone(),
                 delta_str,
-                self.plaintext_hashes().as_ref().unwrap()[count].clone(),
-                self.labelsum_hashes().as_ref().unwrap()[count].clone(),
-                self.zero_sums().as_ref().unwrap()[count].clone(),
+                plaintext_hash,
+                labelsum_hash,
+                zero_sum,
             );
             if res.is_err() {
                 return Ok(false);
@@ -191,35 +207,6 @@ pub trait Verifier: VerifierGetSet {
         }
         return Ok(true);
     }
-}
-
-/// accessors for the fields defined in [`VerfierImplementorTemplate`] which are
-/// auto-implemented when using #[derive(VerifierGetSetM)]
-pub trait VerifierGetSet {
-    /// hashes for each chunk of Prover's plaintext
-    fn plaintext_hashes(&self) -> &Option<Vec<BigUint>>;
-    fn set_plaintext_hashes(&mut self, new: Option<Vec<BigUint>>);
-
-    fn labelsum_hashes(&self) -> &Option<Vec<BigUint>>;
-    fn set_labelsum_hashes(&mut self, new: Option<Vec<BigUint>>);
-
-    // if set to true, then we must send the proving key to the Prover
-    // before this protocol begins. Otherwise, it is assumed that the Prover
-    // already has the proving key from a previous interaction with us.
-    fn proving_key_needed(&self) -> &bool;
-    fn set_proving_key_needed(&mut self, new: bool);
-
-    fn deltas(&self) -> &Option<Vec<BigUint>>;
-    fn set_deltas(&mut self, new: Option<Vec<BigUint>>);
-
-    fn zero_sums(&self) -> &Option<Vec<BigUint>>;
-    fn set_zero_sums(&mut self, new: Option<Vec<BigUint>>);
-
-    fn ciphertexts(&self) -> &Option<Vec<[Vec<u8>; 2]>>;
-    fn set_ciphertexts(&mut self, new: Option<Vec<[Vec<u8>; 2]>>);
-
-    fn useful_bits(&self) -> &usize;
-    fn set_useful_bits(&mut self, new: usize);
 }
 
 fn random_bigint(bitsize: usize) -> BigUint {
@@ -230,7 +217,7 @@ fn random_bigint(bitsize: usize) -> BigUint {
 }
 
 #[inline]
-pub fn u8vec_to_boolvec(v: &[u8]) -> Vec<bool> {
+fn u8vec_to_boolvec(v: &[u8]) -> Vec<bool> {
     let mut bv = Vec::with_capacity(v.len() * 8);
     for byte in v.iter() {
         for i in 0..8 {
@@ -243,7 +230,7 @@ pub fn u8vec_to_boolvec(v: &[u8]) -> Vec<bool> {
 // Convert bits into bytes. The bits will be left-padded with zeroes to the
 // multiple of 8.
 #[inline]
-pub fn boolvec_to_u8vec(bv: &[bool]) -> Vec<u8> {
+fn boolvec_to_u8vec(bv: &[bool]) -> Vec<u8> {
     let rem = bv.len() % 8;
     let first_byte_bitsize = if rem == 0 { 8 } else { rem };
     let offset = if rem == 0 { 0 } else { 1 };
