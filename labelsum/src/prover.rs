@@ -15,11 +15,13 @@ pub enum ProverError {
     FileSystemError,
     FileDoesNotExist,
     SnarkjsError,
+    IncorrectEncryptedLabelSize,
+    ErrorInPoseidonImplementation,
 }
 
-// ProverData contains data common to all implementors of Prover.
-// We use a macro to define a trait with accessors and another macro
-// to implement those accessors.
+/// ProverData contains data common to all implementors of Prover.
+/// We use a macro to define a trait with accessors and another macro
+/// to implement those accessors.
 #[define_accessors_trait(ProverDataGetSet)]
 #[derive(ProverDataGetSet)]
 pub struct ProverData {
@@ -29,9 +31,10 @@ pub struct ProverData {
     field_prime: Option<BigUint>,
     // how many bits to pack into one field element
     useful_bits: Option<usize>,
-    // the size of one chunk == useful_bits * POSEIDON_WIDTH - 128 (salt size)
+    // the size of one chunk of plaintext ==
+    // useful_bits * POSEIDON_WIDTH - 128 (salt size)
     chunk_size: Option<usize>,
-    // We will compute a separate Poseidon hash on each chunk of the plaintext.
+    // we will compute a separate Poseidon hash on each chunk of the plaintext.
     // Each chunk contains POSEIDON_WIDTH * PERMUTATION_COUNT field elements.
     chunks: Option<Vec<Vec<BigUint>>>,
     // Poseidon hashes of each chunk
@@ -72,15 +75,19 @@ pub trait Prover {
 
     /// Hashes inputs with the Poseidon hash. Inputs are field elements (FEs). The
     /// amount of FEs must be POSEIDON_WIDTH * PERMUTATION_COUNT
-    fn poseidon(&mut self, inputs: &Vec<BigUint>) -> BigUint;
+    fn poseidon(&mut self, inputs: &Vec<BigUint>) -> Result<BigUint, ProverError>;
 
     /// Produces a groth16 proof with snarkjs. Input must be a JSON string in the
     /// "input.json" format which snarkjs expects.
-    fn prove(&mut self, input: String) -> Result<Vec<u8>, ProverError>;
+    fn prove(&mut self, input: &String) -> Result<Vec<u8>, ProverError>;
 
     /// Returns a reference to the `data` field
     /// must be implemented as { &mut self.data }
     fn data(&mut self) -> &mut ProverData;
+
+    /// Returns an **immutable** reference to the `data` field
+    /// must be implemented as { &self.data }
+    fn data_immut(&self) -> &ProverData;
 
     // the rest of the methods have default implementations
 
@@ -111,18 +118,23 @@ pub trait Prover {
         Ok(hashes)
     }
 
-    // decrypt each encrypted arithm.label based on the p&p bit of our active
-    // binary label. Return the hash of the sum of all arithm. labels. Note
-    // that we compute a separate label sum for each chunk of plaintext.
+    /// Decrypts each encrypted arithm. label based on the point-and-permute
+    /// (p&p) bit of our corresponding active binary label. Computes the sum of
+    /// all arithmetic labels for each chunk of plaintext. Returns the hash of
+    /// each sum.
     fn compute_label_sum(
         &mut self,
         ciphertexts: &Vec<[Vec<u8>; 2]>,
         labels: &Vec<u128>,
-    ) -> Vec<BigUint> {
-        // if binary label's p&p bit is 0, decrypt the 1st ciphertext,
-        // otherwise decrypt the 2nd one.
-        assert!(ciphertexts.len() == labels.len());
-        assert!(self.data().plaintext().as_ref().unwrap().len() * 8 == ciphertexts.len());
+    ) -> Result<Vec<BigUint>, ProverError> {
+        if ciphertexts.len() != labels.len() {
+            return Err(ProverError::IncorrectEncryptedLabelSize);
+        }
+        if self.data().plaintext().as_ref().unwrap().len() * 8 != ciphertexts.len() {
+            return Err(ProverError::IncorrectEncryptedLabelSize);
+        }
+
+        // Each chunk is hashed separately
         let mut label_sum_hashes: Vec<BigUint> =
             Vec::with_capacity(self.data().chunks().as_ref().unwrap().len());
 
@@ -130,11 +142,12 @@ pub trait Prover {
         let lb_iter = labels.chunks(self.data().chunk_size().unwrap());
         // process a pair (chunk of ciphertexts, chunk of corresponding labels) at a time
         for (chunk_ct, chunk_lb) in ct_iter.zip(lb_iter) {
-            // accumulate the label sum here
+            // accumulate the label sum for one chunk here
             let mut label_sum = BigUint::from_u8(0).unwrap();
             for (ct_pair, label) in chunk_ct.iter().zip(chunk_lb) {
                 let key = Aes128::new_from_slice(&label.to_be_bytes()).unwrap();
-                // choose which ciphertext to decrypt based on the point-and-permute bit
+                // if binary label's p&p bit is 0, decrypt the 1st ciphertext,
+                // otherwise decrypt the 2nd one.
                 let mut ct = [0u8; 16];
                 if label & 1 == 0 {
                     ct.copy_from_slice(&ct_pair[0]);
@@ -147,66 +160,72 @@ pub trait Prover {
                 label_sum += BigUint::from_bytes_be(&ct);
             }
 
-            println!("{:?} label_sum", label_sum);
-            label_sum_hashes.push(self.poseidon(&vec![label_sum]));
+            label_sum_hashes.push(self.poseidon(&vec![label_sum])?);
         }
 
         self.data()
             .set_label_sum_hashes(Some(label_sum_hashes.clone()));
-        label_sum_hashes
+        Ok(label_sum_hashes)
     }
 
-    fn create_zk_proof(
-        &mut self,
-        zero_sum: Vec<BigUint>,
-        mut deltas: Vec<BigUint>,
-    ) -> Result<Vec<Vec<u8>>, ProverError> {
-        let label_sum_hashes = self.data().label_sum_hashes().as_ref().unwrap().clone();
+    // Creates inputs in the "input.json" format
+    fn create_proof_inputs(&self, zero_sum: Vec<BigUint>, mut deltas: Vec<BigUint>) -> Vec<String> {
+        let label_sum_hashes = self.data_immut().label_sum_hashes().as_ref().unwrap();
+        let useful_bits = self.data_immut().useful_bits().unwrap();
+        let chunk_size = self.data_immut().chunk_size().unwrap();
+        let chunks = self.data_immut().chunks().as_ref().unwrap();
+        let pt_hashes = self.data_immut().hashes_of_chunks().as_ref().unwrap();
 
-        // the last chunk will be padded with zero plaintext. We also should pad
-        // the deltas of the last chunk
-        let useful_bits = self.data().useful_bits().unwrap();
-        // the size of a chunk of plaintext not counting the salt
-        let chunk_size = useful_bits * 16 - 128;
-        let chunk_count = self.data().chunks().as_ref().unwrap().len();
-
-        // pad deltas with 0 values to make their count a multiple of a chunk size
-        let delta_pad_count = chunk_size * chunk_count - deltas.len();
+        // Since the last chunk is padded with zero plaintext, we also zero-pad
+        // the corresponding deltas of the last chunk.
+        let delta_pad_count = chunk_size * chunks.len() - deltas.len();
         deltas.extend(vec![BigUint::from_u8(0).unwrap(); delta_pad_count]);
 
         // we will have as many proofs as there are chunks of plaintext
-        let mut proofs: Vec<Vec<u8>> = Vec::with_capacity(chunk_count);
-        let deltas_chunks: Vec<&[BigUint]> = deltas.chunks(chunk_size).collect();
+        let mut inputs: Vec<String> = Vec::with_capacity(chunks.len());
+        let chunks_of_deltas: Vec<&[BigUint]> = deltas.chunks(chunk_size).collect();
 
-        for count in 0..chunk_count {
-            // convert plaintext to string
-            let pt_str: Vec<String> = self.data().chunks().as_ref().unwrap()[count]
-                .to_vec()
+        for count in 0..chunks.len() {
+            // convert each field element of plaintext into a string
+            let pt_str: Vec<String> = chunks[count]
                 .iter()
                 .map(|bigint| bigint.to_string())
                 .collect();
 
             // convert all deltas to strings
-            let deltas_str: Vec<String> =
-                deltas_chunks[count].iter().map(|v| v.to_string()).collect();
+            let deltas_str: Vec<String> = chunks_of_deltas[count]
+                .iter()
+                .map(|v| v.to_string())
+                .collect();
 
-            // split deltas into 16 groups corresponding to 16 field elements
+            // split deltas into groups corresponding to the field elements
+            // for our Poseidon circuit
             let deltas_fes: Vec<&[String]> = deltas_str.chunks(useful_bits).collect();
 
             // prepare input.json
-            let mut data = object! {
-                plaintext_hash: self.data().hashes_of_chunks().as_ref().unwrap()[count].to_string(),
+            let input = object! {
+                plaintext_hash: pt_hashes[count].to_string(),
                 label_sum_hash: label_sum_hashes[count].to_string(),
                 sum_of_zero_labels: zero_sum[count].to_string(),
                 plaintext: pt_str,
-                // first 15 fes form a separate input
-                delta: deltas_fes[0..15],
-                delta_last: deltas_fes[15]
+                delta: deltas_fes[0..deltas_fes.len()-1],
+                // last field element's deltas form a separate input
+                delta_last: deltas_fes[deltas_fes.len()-1]
             };
-            let s = stringify_pretty(data, 4);
-            proofs.push(self.prove(s).unwrap());
+            let s = stringify_pretty(input, 4);
+            inputs.push(s);
         }
-        Ok(proofs)
+        inputs
+    }
+
+    // Creates a zk proof of decoding for each chunk of plaintext.
+    fn create_zk_proof(
+        &mut self,
+        zero_sum: Vec<BigUint>,
+        deltas: Vec<BigUint>,
+    ) -> Result<Vec<Vec<u8>>, ProverError> {
+        let inputs = self.create_proof_inputs(zero_sum, deltas);
+        inputs.iter().map(|input| Ok(self.prove(input)?)).collect()
     }
 
     /// Create chunks of plaintext where each chunk consists of 16 field elements.
@@ -263,7 +282,7 @@ pub trait Prover {
                 if chunk.len() != POSEIDON_WIDTH * PERMUTATION_COUNT {
                     return Err(ProverError::WrongPoseidonInput);
                 }
-                Ok(self.poseidon(chunk))
+                Ok(self.poseidon(chunk)?)
             })
             .collect()
     }

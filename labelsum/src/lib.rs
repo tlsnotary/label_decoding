@@ -100,19 +100,23 @@ mod tests {
         verifier.setup(&all_binary_labels);
 
         let mut prover = ProverNode::new();
-        prover.set_proving_key(proving_key);
-        let plaintext_hash = prover.setup(prime, plaintext.to_vec()).unwrap();
+        prover.set_proving_key(proving_key).unwrap();
 
         // Commitment to the plaintext is sent to the Verifier
-        let cipheretexts = verifier.receive_pt_hashes(plaintext_hash);
+        let plaintext_hash = prover.setup(prime, plaintext.to_vec()).unwrap();
+
         // Verifier sends back encrypted arithm. labels.
+        let cipheretexts = verifier.receive_pt_hashes(plaintext_hash);
 
-        let label_sum_hashes = prover.compute_label_sum(&cipheretexts, &prover_labels);
         // Hash commitment to the label_sum is sent to the Notary
+        let label_sum_hashes = prover
+            .compute_label_sum(&cipheretexts, &prover_labels)
+            .unwrap();
 
-        let (deltas, zero_sums) = verifier.receive_labelsum_hash(label_sum_hashes);
         // Notary sends zero_sum and all deltas
-        // Prover constructs input to snarkjs
+        let (deltas, zero_sums) = verifier.receive_labelsum_hash(label_sum_hashes);
+
+        // Prover generates the proof
         let proofs = prover.create_zk_proof(zero_sums, deltas).unwrap();
 
         // Verifier verifies the proof

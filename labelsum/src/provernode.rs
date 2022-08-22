@@ -32,7 +32,7 @@ impl ProverNode {
         &mut self,
         ciphertexts: &Vec<[Vec<u8>; 2]>,
         labels: &Vec<u128>,
-    ) -> Vec<BigUint> {
+    ) -> Result<Vec<BigUint>, ProverError> {
         self.parent.compute_label_sum(ciphertexts, labels)
     }
 
@@ -63,6 +63,10 @@ impl Prover for ProverNodeInternal {
         &mut self.data
     }
 
+    fn data_immut(&self) -> &ProverData {
+        &self.data
+    }
+
     fn set_proving_key(&mut self, key: Vec<u8>) -> Result<(), ProverError> {
         let res = fs::write("circuit_final.zkey.verifier", key);
         if res.is_err() {
@@ -72,7 +76,7 @@ impl Prover for ProverNodeInternal {
     }
 
     // hash the inputs with circomlibjs's Poseidon
-    fn poseidon(&mut self, inputs: &Vec<BigUint>) -> BigUint {
+    fn poseidon(&mut self, inputs: &Vec<BigUint>) -> Result<BigUint, ProverError> {
         // convert field elements into escaped strings
         let strchunks: Vec<String> = inputs
             .iter()
@@ -80,22 +84,26 @@ impl Prover for ProverNodeInternal {
             .collect();
         // convert to JSON array
         let json = String::from("[") + &strchunks.join(", ") + &String::from("]");
-        println!("json {:?}", json);
 
-        let output = Command::new("node")
-            .args(["poseidon.mjs", &json])
-            .output()
-            .unwrap();
-        println!("{:?}", output);
+        let output = Command::new("node").args(["poseidon.mjs", &json]).output();
+        if output.is_err() {
+            return Err(ProverError::ErrorInPoseidonImplementation);
+        }
+        let output = output.unwrap();
         // drop the trailing new line
         let output = &output.stdout[0..output.stdout.len() - 1];
-        let s = String::from_utf8(output.to_vec()).unwrap();
-        let bi = s.parse::<BigUint>().unwrap();
-        //println!("poseidon output {:?}", bi);
-        bi
+        let str = String::from_utf8(output.to_vec());
+        if str.is_err() {
+            return Err(ProverError::ErrorInPoseidonImplementation);
+        }
+        let bi = str.unwrap().parse::<BigUint>();
+        if bi.is_err() {
+            return Err(ProverError::ErrorInPoseidonImplementation);
+        }
+        Ok(bi.unwrap())
     }
 
-    fn prove(&mut self, input: String) -> Result<Vec<u8>, ProverError> {
+    fn prove(&mut self, input: &String) -> Result<Vec<u8>, ProverError> {
         let mut path1 = temp_dir();
         let mut path2 = temp_dir();
         path1.push(format!("input.json.{}", Uuid::new_v4()));
