@@ -13,6 +13,11 @@ pub mod verifiernode;
 const BN254_PRIME: &str =
     "21888242871839275222246405745257275088548364400416034343698204186575808495617";
 
+/// How many field elements our Poseidon hash consumes for one permutation.
+const POSEIDON_WIDTH: usize = 16;
+/// How many permutations our circuit supports.
+const PERMUTATION_COUNT: usize = 1;
+
 pub trait VerifierCore {
     fn get_proving_key(&mut self) -> Result<Vec<u8>, VerifierError>;
 
@@ -89,14 +94,14 @@ mod tests {
         let prover_labels = choose(&all_binary_labels, &u8vec_to_boolvec(&plaintext));
 
         let mut verifier = VerifierNode::new(true);
-        // passing proving key to Prover (if he needs one)
+        // passing proving key to the Prover (if he needs one)
         let proving_key = verifier.get_proving_key().unwrap();
         // produce ciphertexts which are sent to Prover for decryption
         verifier.setup(&all_binary_labels);
 
         let mut prover = ProverNode::new();
         prover.set_proving_key(proving_key);
-        let plaintext_hash = prover.setup(prime, plaintext.to_vec());
+        let plaintext_hash = prover.setup(prime, plaintext.to_vec()).unwrap();
 
         // Commitment to the plaintext is sent to the Verifier
         let cipheretexts = verifier.receive_pt_hashes(plaintext_hash);

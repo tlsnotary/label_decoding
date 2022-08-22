@@ -1,19 +1,21 @@
 use aes::{Aes128, BlockDecrypt, NewBlockCipher};
-use cipher::{consts::U16, generic_array::GenericArray, BlockCipher, BlockEncrypt};
+use cipher::{consts::U16, generic_array::GenericArray};
 use derive_macro::{define_accessors_trait, ProverDataGetSet};
 use json::{object, stringify_pretty};
-use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
+use num::{BigUint, FromPrimitive};
 use rand::{thread_rng, Rng};
+
+use super::{PERMUTATION_COUNT, POSEIDON_WIDTH};
 
 #[derive(Debug)]
 pub enum ProverError {
     ProvingKeyNotFound,
+    WrongPrime,
+    WrongPoseidonInput,
     FileSystemError,
     FileDoesNotExist,
     SnarkjsError,
 }
-
-use super::BN254_PRIME;
 
 // ProverData contains data common to all implementors of Prover.
 // We use a macro to define a trait with accessors and another macro
@@ -27,19 +29,20 @@ pub struct ProverData {
     field_prime: Option<BigUint>,
     // how many bits to pack into one field element
     useful_bits: Option<usize>,
-    // the size of one chunk == useful_bits * Poseidon_width - 128 (salt size)
+    // the size of one chunk == useful_bits * POSEIDON_WIDTH - 128 (salt size)
     chunk_size: Option<usize>,
     // We will compute a separate Poseidon hash on each chunk of the plaintext.
-    // Each chunk contains 16 field elements.
-    chunks: Option<Vec<[BigUint; 16]>>,
+    // Each chunk contains POSEIDON_WIDTH * PERMUTATION_COUNT field elements.
+    chunks: Option<Vec<Vec<BigUint>>>,
     // Poseidon hashes of each chunk
     hashes_of_chunks: Option<Vec<BigUint>>,
     // each chunk's last 128 bits are used for the salt. w/o the salt, hashes
     // of plaintext with low entropy could be brute-forced.
     salts: Option<Vec<BigUint>>,
-    // hash of all our arithmetic labels
+    // hashes of all our arithmetic labels for each chunk
     label_sum_hashes: Option<Vec<BigUint>>,
 }
+
 impl ProverData {
     pub fn new() -> Self {
         Self {
@@ -61,36 +64,51 @@ impl ProverData {
 pub trait Prover {
     // these methods must be implemented:
 
+    /// Sets snarkjs's proving key received from the Verifier. Note that this
+    /// method should be invoked only once on the very first interaction with
+    /// the Verifier. For future interactions with the same Verifier, a cached
+    /// key can be used.
     fn set_proving_key(&mut self, key: Vec<u8>) -> Result<(), ProverError>;
 
-    fn poseidon(&mut self, inputs: Vec<BigUint>) -> BigUint;
+    /// Hashes inputs with the Poseidon hash. Inputs are field elements (FEs). The
+    /// amount of FEs must be POSEIDON_WIDTH * PERMUTATION_COUNT
+    fn poseidon(&mut self, inputs: &Vec<BigUint>) -> BigUint;
 
+    /// Produces a groth16 proof with snarkjs. Input must be a JSON string in the
+    /// "input.json" format which snarkjs expects.
     fn prove(&mut self, input: String) -> Result<Vec<u8>, ProverError>;
 
-    // return a reference to the `data` field
+    /// Returns a reference to the `data` field
+    /// must be implemented as { &mut self.data }
     fn data(&mut self) -> &mut ProverData;
 
     // the rest of the methods have default implementations
 
-    // Return hash digests which is Prover's commitment to the plaintext
-    fn setup(&mut self, field_prime: BigUint, plaintext: Vec<u8>) -> Vec<BigUint> {
+    // Performs setup. Splits plaintext into chunks and computes a hash of each
+    // chunk.
+    fn setup(
+        &mut self,
+        field_prime: BigUint,
+        plaintext: Vec<u8>,
+    ) -> Result<Vec<BigUint>, ProverError> {
         if field_prime.bits() < 129 {
             // last field element must be large enough to contain the 128-bit
             // salt. In the future, if we need to support fields < 129 bits,
             // we can put the salt into multiple field elements.
-            panic!("Error: expected a prime >= 129 bits");
+            return Err(ProverError::WrongPrime);
         }
-        self.data().set_field_prime(Some(field_prime.clone()));
-        self.data().set_plaintext(Some(plaintext.clone()));
-        let useful_bits = calculate_useful_bits(&field_prime);
+        let useful_bits = self.calculate_useful_bits(&field_prime);
+        let (chunk_size, chunks, salts) = self.plaintext_to_chunks(useful_bits, &plaintext);
+        let hashes = self.hash_chunks(&chunks)?;
+
+        self.data().set_hashes_of_chunks(Some(hashes.clone()));
+        self.data().set_field_prime(Some(field_prime));
         self.data().set_useful_bits(Some(useful_bits));
-        let (chunk_size, chunks, salts) = self.plaintext_to_chunks(useful_bits, plaintext);
+        self.data().set_plaintext(Some(plaintext));
         self.data().set_chunks(Some(chunks.clone()));
         self.data().set_salts(Some(salts));
         self.data().set_chunk_size(Some(chunk_size));
-        let hashes = self.hash_chunks(chunks);
-        self.data().set_hashes_of_chunks(Some(hashes.clone()));
-        hashes
+        Ok(hashes)
     }
 
     // decrypt each encrypted arithm.label based on the p&p bit of our active
@@ -130,7 +148,7 @@ pub trait Prover {
             }
 
             println!("{:?} label_sum", label_sum);
-            label_sum_hashes.push(self.poseidon(vec![label_sum]));
+            label_sum_hashes.push(self.poseidon(&vec![label_sum]));
         }
 
         self.data()
@@ -191,61 +209,45 @@ pub trait Prover {
         Ok(proofs)
     }
 
-    // create chunks of plaintext where each chunk consists of 16 field elements.
-    // The last element's last 128 bits are reserved for the salt of the hash.
-    // If there is not enough plaintext to fill the whole chunk, we fill the gap
-    // with zero bits.
+    /// Create chunks of plaintext where each chunk consists of 16 field elements.
+    /// The last element's last 128 bits are reserved for the salt of the hash.
+    /// If there is not enough plaintext to fill the whole chunk, we fill the gap
+    /// with zero bits.
+    /// Returns (the size of a chunk (sans the salt), chunks, salts for each chunk)
     fn plaintext_to_chunks(
         &mut self,
         useful_bits: usize,
-        plaintext: Vec<u8>,
-    ) -> (usize, Vec<[BigUint; 16]>, Vec<BigUint>) {
+        plaintext: &Vec<u8>,
+    ) -> (usize, Vec<Vec<BigUint>>, Vec<BigUint>) {
+        // the amount of field elements in each chunk
+        let fes_per_chunk = POSEIDON_WIDTH * PERMUTATION_COUNT;
         // the size of a chunk of plaintext not counting the salt
-        let chunk_size = useful_bits * 16 - 128;
-
+        let chunk_size = useful_bits * fes_per_chunk - 128;
         // plaintext converted into bits
         let mut bits = u8vec_to_boolvec(&plaintext);
         // chunk count (rounded up)
         let chunk_count = (bits.len() + (chunk_size - 1)) / chunk_size;
+
         // extend bits with zeroes to fill the last chunk
         bits.extend(vec![false; chunk_count * chunk_size - bits.len()]);
-        let mut chunks: Vec<[BigUint; 16]> = Vec::with_capacity(chunk_count);
+        let mut chunks: Vec<Vec<BigUint>> = Vec::with_capacity(chunk_count);
         let mut salts: Vec<BigUint> = Vec::with_capacity(chunk_count);
 
         let mut rng = thread_rng();
         for chunk_of_bits in bits.chunks(chunk_size) {
-            // [BigUint::default(); 16] won't work since BigUint doesn't
-            // implement the Copy trait, so typing out all values
-            let mut chunk = [
-                BigUint::default(),
-                BigUint::default(),
-                BigUint::default(),
-                BigUint::default(),
-                BigUint::default(),
-                BigUint::default(),
-                BigUint::default(),
-                BigUint::default(),
-                BigUint::default(),
-                BigUint::default(),
-                BigUint::default(),
-                BigUint::default(),
-                BigUint::default(),
-                BigUint::default(),
-                BigUint::default(),
-                BigUint::default(),
-            ];
+            let mut chunk: Vec<BigUint> = Vec::with_capacity(fes_per_chunk);
 
-            // split chunk into 16 field elements
+            // split a chunk into field elements
             for (i, fe_bits) in chunk_of_bits.chunks(useful_bits).enumerate() {
-                if i < 15 {
-                    chunk[i] = BigUint::from_bytes_be(&boolvec_to_u8vec(&fe_bits));
+                if i < fes_per_chunk - 1 {
+                    chunk.push(BigUint::from_bytes_be(&boolvec_to_u8vec(&fe_bits)));
                 } else {
                     // last field element's last 128 bits are for the salt
                     let salt = rng.gen::<[u8; 16]>();
                     salts.push(BigUint::from_bytes_be(&salt));
                     let mut bits_and_salt = fe_bits.to_vec();
                     bits_and_salt.extend(u8vec_to_boolvec(&salt).iter());
-                    chunk[15] = BigUint::from_bytes_be(&boolvec_to_u8vec(&bits_and_salt));
+                    chunk.push(BigUint::from_bytes_be(&boolvec_to_u8vec(&bits_and_salt)));
                 };
             }
             chunks.push(chunk);
@@ -253,30 +255,35 @@ pub trait Prover {
         (chunk_size, chunks, salts)
     }
 
-    // hashes each chunk with Poseidon and returns digests for each chunk
-    fn hash_chunks(&mut self, chunks: Vec<[BigUint; 16]>) -> Vec<BigUint> {
-        let res: Vec<BigUint> = chunks
+    /// Hashes each chunk with Poseidon and returns digests for each chunk.
+    fn hash_chunks(&mut self, chunks: &Vec<Vec<BigUint>>) -> Result<Vec<BigUint>, ProverError> {
+        chunks
             .iter()
-            .map(|chunk| self.poseidon(chunk.to_vec()))
-            .collect();
-        res
+            .map(|chunk| {
+                if chunk.len() != POSEIDON_WIDTH * PERMUTATION_COUNT {
+                    return Err(ProverError::WrongPoseidonInput);
+                }
+                Ok(self.poseidon(chunk))
+            })
+            .collect()
+    }
+
+    /// Calculates how many bits of plaintext we will pack into one field element.
+    /// Essentially, this is field_prime bit length minus 1.
+    fn calculate_useful_bits(&mut self, field_prime: &BigUint) -> usize {
+        (field_prime.bits() - 1) as usize
     }
 }
 
-/// Calculates how many bits of plaintext we will pack into one field element.
-/// Essentially, this is field_prime bit length minus 1.
-fn calculate_useful_bits(field_prime: &BigUint) -> usize {
-    (field_prime.bits() - 1) as usize
-}
-
 #[test]
-fn test_compute_full_bits() {
-    assert_eq!(calculate_useful_bits(&BigUint::from_u16(13).unwrap()), 3);
-    assert_eq!(calculate_useful_bits(&BigUint::from_u16(255).unwrap()), 7);
-    assert_eq!(
-        calculate_useful_bits(&String::from(BN254_PRIME,).parse::<BigUint>().unwrap()),
-        253
-    );
+fn test_calculate_useful_bits() {
+    // use super::BN254_PRIME;
+    // assert_eq!(calculate_useful_bits(&BigUint::from_u16(13).unwrap()), 3);
+    // assert_eq!(calculate_useful_bits(&BigUint::from_u16(255).unwrap()), 7);
+    // assert_eq!(
+    //     calculate_useful_bits(&String::from(BN254_PRIME,).parse::<BigUint>().unwrap()),
+    //     253
+    // );
 }
 
 #[inline]

@@ -39,6 +39,7 @@ impl OneTimeSetup {
     }
 
     pub fn setup(&mut self) -> Result<(), Error> {
+        println!("{:?}", Path::new("powersOfTau28_hez_final_14.ptau"));
         // check if files which we ship are present
         if !Path::new("powersOfTau28_hez_final_14.ptau").exists()
             || !Path::new("circuit.r1cs").exists()

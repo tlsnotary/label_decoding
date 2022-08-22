@@ -48,6 +48,7 @@ impl VerifierData {
 pub trait Verifier {
     // these methods must be implemented:
 
+    // Gets
     fn get_proving_key(&mut self) -> Result<Vec<u8>, VerifierError>;
 
     fn verify(

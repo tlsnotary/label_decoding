@@ -20,7 +20,11 @@ impl ProverNode {
         self.parent.set_proving_key(key)
     }
 
-    pub fn setup(&mut self, field_prime: BigUint, plaintext: Vec<u8>) -> Vec<BigUint> {
+    pub fn setup(
+        &mut self,
+        field_prime: BigUint,
+        plaintext: Vec<u8>,
+    ) -> Result<Vec<BigUint>, ProverError> {
         self.parent.setup(field_prime, plaintext)
     }
 
@@ -68,7 +72,7 @@ impl Prover for ProverNodeInternal {
     }
 
     // hash the inputs with circomlibjs's Poseidon
-    fn poseidon(&mut self, inputs: Vec<BigUint>) -> BigUint {
+    fn poseidon(&mut self, inputs: &Vec<BigUint>) -> BigUint {
         // convert field elements into escaped strings
         let strchunks: Vec<String> = inputs
             .iter()
