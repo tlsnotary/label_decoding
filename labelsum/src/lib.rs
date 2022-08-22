@@ -102,15 +102,18 @@ mod tests {
         let mut prover = ProverNode::new();
         prover.set_proving_key(proving_key).unwrap();
 
+        // Perform setup
+        prover.setup(prime, plaintext.to_vec()).unwrap();
+
         // Commitment to the plaintext is sent to the Verifier
-        let plaintext_hash = prover.setup(prime, plaintext.to_vec()).unwrap();
+        let plaintext_hash = prover.plaintext_commitment().unwrap();
 
         // Verifier sends back encrypted arithm. labels.
         let cipheretexts = verifier.receive_pt_hashes(plaintext_hash);
 
         // Hash commitment to the label_sum is sent to the Notary
         let label_sum_hashes = prover
-            .compute_label_sum(&cipheretexts, &prover_labels)
+            .labelsum_commitment(&cipheretexts, &prover_labels)
             .unwrap();
 
         // Notary sends zero_sum and all deltas

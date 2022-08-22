@@ -20,20 +20,20 @@ impl ProverNode {
         self.parent.set_proving_key(key)
     }
 
-    pub fn setup(
-        &mut self,
-        field_prime: BigUint,
-        plaintext: Vec<u8>,
-    ) -> Result<Vec<BigUint>, ProverError> {
+    pub fn setup(&mut self, field_prime: BigUint, plaintext: Vec<u8>) -> Result<(), ProverError> {
         self.parent.setup(field_prime, plaintext)
     }
 
-    pub fn compute_label_sum(
+    pub fn plaintext_commitment(&mut self) -> Result<Vec<BigUint>, ProverError> {
+        self.parent.plaintext_commitment()
+    }
+
+    pub fn labelsum_commitment(
         &mut self,
         ciphertexts: &Vec<[Vec<u8>; 2]>,
         labels: &Vec<u128>,
     ) -> Result<Vec<BigUint>, ProverError> {
-        self.parent.compute_label_sum(ciphertexts, labels)
+        self.parent.labelsum_commitment(ciphertexts, labels)
     }
 
     pub fn create_zk_proof(
@@ -67,6 +67,10 @@ impl Prover for ProverNodeInternal {
         &self.data
     }
 
+    /// Sets snarkjs's proving key received from the Verifier. Note that this
+    /// method should be invoked only once on the very first interaction with
+    /// the Verifier. For future interactions with the same Verifier, a cached
+    /// key can be used.
     fn set_proving_key(&mut self, key: Vec<u8>) -> Result<(), ProverError> {
         let res = fs::write("circuit_final.zkey.verifier", key);
         if res.is_err() {
@@ -75,7 +79,8 @@ impl Prover for ProverNodeInternal {
         Ok(())
     }
 
-    // hash the inputs with circomlibjs's Poseidon
+    /// Hashes inputs with the Poseidon hash. Inputs are field elements (FEs). The
+    /// amount of FEs must be POSEIDON_WIDTH * PERMUTATION_COUNT
     fn poseidon(&mut self, inputs: &Vec<BigUint>) -> Result<BigUint, ProverError> {
         // convert field elements into escaped strings
         let strchunks: Vec<String> = inputs
@@ -103,6 +108,8 @@ impl Prover for ProverNodeInternal {
         Ok(bi.unwrap())
     }
 
+    /// Produces a groth16 proof with snarkjs. Input must be a JSON string in the
+    /// "input.json" format which snarkjs expects.
     fn prove(&mut self, input: &String) -> Result<Vec<u8>, ProverError> {
         let mut path1 = temp_dir();
         let mut path2 = temp_dir();

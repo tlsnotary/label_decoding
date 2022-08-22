@@ -93,11 +93,7 @@ pub trait Prover {
 
     // Performs setup. Splits plaintext into chunks and computes a hash of each
     // chunk.
-    fn setup(
-        &mut self,
-        field_prime: BigUint,
-        plaintext: Vec<u8>,
-    ) -> Result<Vec<BigUint>, ProverError> {
+    fn setup(&mut self, field_prime: BigUint, plaintext: Vec<u8>) -> Result<(), ProverError> {
         if field_prime.bits() < 129 {
             // last field element must be large enough to contain the 128-bit
             // salt. In the future, if we need to support fields < 129 bits,
@@ -106,40 +102,44 @@ pub trait Prover {
         }
         let useful_bits = self.calculate_useful_bits(&field_prime);
         let (chunk_size, chunks, salts) = self.plaintext_to_chunks(useful_bits, &plaintext);
-        let hashes = self.hash_chunks(&chunks)?;
 
-        self.data().set_hashes_of_chunks(Some(hashes.clone()));
         self.data().set_field_prime(Some(field_prime));
         self.data().set_useful_bits(Some(useful_bits));
         self.data().set_plaintext(Some(plaintext));
         self.data().set_chunks(Some(chunks.clone()));
         self.data().set_salts(Some(salts));
         self.data().set_chunk_size(Some(chunk_size));
+        Ok(())
+    }
+
+    fn plaintext_commitment(&mut self) -> Result<Vec<BigUint>, ProverError> {
+        let chunks = self.data().chunks().as_ref().unwrap().clone();
+        let hashes = self.hash_chunks(&chunks)?;
+        self.data().set_hashes_of_chunks(Some(hashes.clone()));
         Ok(hashes)
     }
 
     /// Decrypts each encrypted arithm. label based on the point-and-permute
     /// (p&p) bit of our corresponding active binary label. Computes the sum of
-    /// all arithmetic labels for each chunk of plaintext. Returns the hash of
-    /// each sum.
-    fn compute_label_sum(
-        &mut self,
+    /// all arithmetic labels for each chunk of plaintext. Returns the sums.
+    fn compute_label_sums(
+        &self,
         ciphertexts: &Vec<[Vec<u8>; 2]>,
         labels: &Vec<u128>,
     ) -> Result<Vec<BigUint>, ProverError> {
         if ciphertexts.len() != labels.len() {
             return Err(ProverError::IncorrectEncryptedLabelSize);
         }
-        if self.data().plaintext().as_ref().unwrap().len() * 8 != ciphertexts.len() {
+        if self.data_immut().plaintext().as_ref().unwrap().len() * 8 != ciphertexts.len() {
             return Err(ProverError::IncorrectEncryptedLabelSize);
         }
 
         // Each chunk is hashed separately
         let mut label_sum_hashes: Vec<BigUint> =
-            Vec::with_capacity(self.data().chunks().as_ref().unwrap().len());
+            Vec::with_capacity(self.data_immut().chunks().as_ref().unwrap().len());
 
-        let ct_iter = ciphertexts.chunks(self.data().chunk_size().unwrap());
-        let lb_iter = labels.chunks(self.data().chunk_size().unwrap());
+        let ct_iter = ciphertexts.chunks(self.data_immut().chunk_size().unwrap());
+        let lb_iter = labels.chunks(self.data_immut().chunk_size().unwrap());
         // process a pair (chunk of ciphertexts, chunk of corresponding labels) at a time
         for (chunk_ct, chunk_lb) in ct_iter.zip(lb_iter) {
             // accumulate the label sum for one chunk here
@@ -160,12 +160,31 @@ pub trait Prover {
                 label_sum += BigUint::from_bytes_be(&ct);
             }
 
-            label_sum_hashes.push(self.poseidon(&vec![label_sum])?);
+            label_sum_hashes.push(label_sum);
         }
-
-        self.data()
-            .set_label_sum_hashes(Some(label_sum_hashes.clone()));
         Ok(label_sum_hashes)
+    }
+
+    /// Computes the sum of all arithmetic labels for each chunk of plaintext.
+    ///  Returns the hash of each sum.
+    fn labelsum_commitment(
+        &mut self,
+        ciphertexts: &Vec<[Vec<u8>; 2]>,
+        labels: &Vec<u128>,
+    ) -> Result<Vec<BigUint>, ProverError> {
+        let sums = self.compute_label_sums(ciphertexts, labels)?;
+
+        let res: Result<Vec<BigUint>, ProverError> = sums
+            .iter()
+            .map(|sum| Ok(self.poseidon(&vec![sum.clone()])?))
+            .collect();
+        if res.is_err() {
+            return Err(ProverError::ErrorInPoseidonImplementation);
+        }
+        let labelsum_hashes = res.unwrap();
+        self.data()
+            .set_label_sum_hashes(Some(labelsum_hashes.clone()));
+        Ok(labelsum_hashes)
     }
 
     // Creates inputs in the "input.json" format
@@ -187,7 +206,7 @@ pub trait Prover {
 
         for count in 0..chunks.len() {
             // convert each field element of plaintext into a string
-            let pt_str: Vec<String> = chunks[count]
+            let plaintext: Vec<String> = chunks[count]
                 .iter()
                 .map(|bigint| bigint.to_string())
                 .collect();
@@ -199,7 +218,7 @@ pub trait Prover {
                 .collect();
 
             // split deltas into groups corresponding to the field elements
-            // for our Poseidon circuit
+            // of our Poseidon circuit
             let deltas_fes: Vec<&[String]> = deltas_str.chunks(useful_bits).collect();
 
             // prepare input.json
@@ -207,7 +226,7 @@ pub trait Prover {
                 plaintext_hash: pt_hashes[count].to_string(),
                 label_sum_hash: label_sum_hashes[count].to_string(),
                 sum_of_zero_labels: zero_sum[count].to_string(),
-                plaintext: pt_str,
+                plaintext: plaintext,
                 delta: deltas_fes[0..deltas_fes.len()-1],
                 // last field element's deltas form a separate input
                 delta_last: deltas_fes[deltas_fes.len()-1]
@@ -218,7 +237,8 @@ pub trait Prover {
         inputs
     }
 
-    // Creates a zk proof of decoding for each chunk of plaintext.
+    // Creates a zk proof of label decoding for each chunk of plaintext. Returns
+    // proofs in the snarkjs's "proof.json" format
     fn create_zk_proof(
         &mut self,
         zero_sum: Vec<BigUint>,
@@ -234,7 +254,7 @@ pub trait Prover {
     /// with zero bits.
     /// Returns (the size of a chunk (sans the salt), chunks, salts for each chunk)
     fn plaintext_to_chunks(
-        &mut self,
+        &self,
         useful_bits: usize,
         plaintext: &Vec<u8>,
     ) -> (usize, Vec<Vec<BigUint>>, Vec<BigUint>) {
@@ -289,7 +309,7 @@ pub trait Prover {
 
     /// Calculates how many bits of plaintext we will pack into one field element.
     /// Essentially, this is field_prime bit length minus 1.
-    fn calculate_useful_bits(&mut self, field_prime: &BigUint) -> usize {
+    fn calculate_useful_bits(&self, field_prime: &BigUint) -> usize {
         (field_prime.bits() - 1) as usize
     }
 }
