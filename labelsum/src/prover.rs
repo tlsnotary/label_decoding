@@ -166,7 +166,7 @@ pub trait Prover {
     }
 
     /// Computes the sum of all arithmetic labels for each chunk of plaintext.
-    ///  Returns the hash of each sum.
+    /// Returns the hash of each sum.
     fn labelsum_commitment(
         &mut self,
         ciphertexts: &Vec<[Vec<u8>; 2]>,
@@ -314,17 +314,6 @@ pub trait Prover {
     }
 }
 
-#[test]
-fn test_calculate_useful_bits() {
-    // use super::BN254_PRIME;
-    // assert_eq!(calculate_useful_bits(&BigUint::from_u16(13).unwrap()), 3);
-    // assert_eq!(calculate_useful_bits(&BigUint::from_u16(255).unwrap()), 7);
-    // assert_eq!(
-    //     calculate_useful_bits(&String::from(BN254_PRIME,).parse::<BigUint>().unwrap()),
-    //     253
-    // );
-}
-
 #[inline]
 pub fn u8vec_to_boolvec(v: &[u8]) -> Vec<bool> {
     let mut bv = Vec::with_capacity(v.len() * 8);
@@ -358,57 +347,113 @@ pub fn boolvec_to_u8vec(bv: &[bool]) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::provernode::ProverNode;
+    use num::ToPrimitive;
 
-    // #[test]
-    //  TODO finish this test
-    // fn test_plaintext_to_chunks() {
-    //     // 137-bit prime. Plaintext will be packed into 136 bits (17 bytes).
-    //     let mut prime = vec![false; 137];
-    //     prime[0] = true;
-    //     let prime = boolvec_to_u8vec(&prime);
-    //     let prime = BigUint::from_bytes_be(&prime);
-    //     // plaintext will spawn 2 chunks
-    //     let mut plaintext = vec![0u8; 17 * 15 + 1 + 17 * 5];
-    //     // first chunk's field elements
-    //     for i in 0..15 {
-    //         // make the last byte of each field element unique
-    //         plaintext[i * 17 + 16] = i as u8;
-    //     }
-    //     // first chunk's last field element's plaintext is 1 zero byte. The
-    //     // rest of the field element will be filled with salt
-    //     plaintext[15 * 17] = 0u8;
+    // a mock prover used to test the default implementation of the
+    // `trait Prover` methods
+    pub struct ProverMock {
+        data: ProverData,
+    }
 
-    //     // second chunk's field elements
-    //     for i in 0..5 {
-    //         // make the last byte of each field element unique
-    //         plaintext[(15 * 17 + 1) + i * 17 + 16] = (i + 16) as u8;
-    //     }
+    impl ProverMock {
+        pub fn new() -> Self {
+            Self {
+                data: ProverData::new(),
+            }
+        }
+    }
 
-    //     let mut prover = ProverNode::new();
-    //     prover.setup(prime, plaintext);
+    impl Prover for ProverMock {
+        fn data(&mut self) -> &mut ProverData {
+            &mut self.data
+        }
 
-    //     // Check chunk1 correctness
-    //     let chunk1: Vec<u128> = prover.chunks().clone().unwrap()[0][0..15]
-    //         .iter()
-    //         .map(|bigint| bigint.to_u128().unwrap())
-    //         .collect();
-    //     assert_eq!(chunk1, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
-    //     // the last field element must be random salt. We just check that the
-    //     // salt has been set, i.e. it is not equal 0
-    //     assert!(!prover.chunks().clone().unwrap()[0][15].eq(&BigUint::from_u8(0).unwrap()));
+        fn data_immut(&self) -> &ProverData {
+            &self.data
+        }
 
-    //     // Check chunk2 correctness
-    //     let chunk2: Vec<u128> = prover.chunks().clone().unwrap()[1][0..15]
-    //         .iter()
-    //         .map(|bigint| bigint.to_u128().unwrap())
-    //         .collect();
-    //     assert_eq!(chunk2, [16, 17, 18, 19, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    //     // the last field element must be random salt. We just check that the
-    //     // salt has been set, i.e. it is not equal 0
-    //     assert!(!prover.chunks().clone().unwrap()[1][15].eq(&BigUint::from_u8(0).unwrap()));
-    // }
+        fn set_proving_key(&mut self, _key: Vec<u8>) -> Result<(), ProverError> {
+            Ok(())
+        }
+
+        fn poseidon(&mut self, _inputs: &Vec<BigUint>) -> Result<BigUint, ProverError> {
+            Ok(BigUint::from_u8(0).unwrap())
+        }
+
+        fn prove(&mut self, _input: &String) -> Result<Vec<u8>, ProverError> {
+            Ok(vec![0])
+        }
+    }
+
     #[test]
-    fn test_hash_chunks() {
+    fn test_calculate_useful_bits() {
+        use crate::BN254_PRIME;
+        let prover = ProverMock::new();
+
+        assert_eq!(
+            prover.calculate_useful_bits(&BigUint::from_u16(13).unwrap()),
+            3
+        );
+        assert_eq!(
+            prover.calculate_useful_bits(&BigUint::from_u16(255).unwrap()),
+            7
+        );
+        assert_eq!(
+            prover.calculate_useful_bits(&String::from(BN254_PRIME,).parse::<BigUint>().unwrap()),
+            253
+        );
+    }
+
+    #[test]
+    fn test_plaintext_to_chunks() {
+        // 137-bit prime. Plaintext will be packed into 136 bits (17 bytes).
+        let mut prime = vec![false; 137];
+        prime[0] = true;
+        let prime = boolvec_to_u8vec(&prime);
+        let prime = BigUint::from_bytes_be(&prime);
+        // plaintext will spawn 2 chunks
+        let mut plaintext = vec![0u8; 17 * 15 + 1 + 17 * 5];
+        // first chunk's field elements
+        for i in 0..15 {
+            // make the last byte of each field element unique
+            plaintext[i * 17 + 16] = i as u8;
+        }
+        // first chunk's last field element's plaintext is 1 zero byte. The
+        // rest of the field element will be filled with salt
+        plaintext[15 * 17] = 0u8;
+
+        // second chunk's field elements
+        for i in 0..5 {
+            // make the last byte of each field element unique
+            plaintext[(15 * 17 + 1) + i * 17 + 16] = (i + 16) as u8;
+        }
+
+        let mut prover = ProverMock::new();
+        prover.setup(prime, plaintext);
+
+        // Check chunk1 correctness
+        let chunk1: Vec<u128> = prover.data().chunks().clone().unwrap()[0][0..15]
+            .iter()
+            .map(|bigint| bigint.to_u128().unwrap())
+            .collect();
+        assert_eq!(chunk1, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+        // the last field element must be random salt. We just check that the
+        // salt has been set, i.e. it is not equal 0
+        assert!(!prover.data().chunks().clone().unwrap()[0][15].eq(&BigUint::from_u8(0).unwrap()));
+
+        // Check chunk2 correctness
+        let chunk2: Vec<u128> = prover.data().chunks().clone().unwrap()[1][0..15]
+            .iter()
+            .map(|bigint| bigint.to_u128().unwrap())
+            .collect();
+        assert_eq!(chunk2, [16, 17, 18, 19, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        // the last field element must be random salt. We just check that the
+        // salt has been set, i.e. it is not equal 0
+        assert!(!prover.data().chunks().clone().unwrap()[1][15].eq(&BigUint::from_u8(0).unwrap()));
+    }
+
+    #[test]
+    fn test_compute_label_sums() {
         // 137-bit prime. Plaintext will be packed into 136 bits (17 bytes).
         let mut prime = vec![false; 137];
         prime[0] = true;
