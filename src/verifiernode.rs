@@ -1,4 +1,4 @@
-use crate::verifier::{Verifier, VerifierData, VerifierError};
+use crate::verifier::{VerifierError, Verify};
 use json::{array, object, stringify, stringify_pretty, JsonValue};
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
 use std::env::temp_dir;
@@ -7,80 +7,11 @@ use std::path::Path;
 use std::process::{Command, Output};
 use uuid::Uuid;
 
-// a simple wrapper which exposes only the public methods of VerifierNodeInternal
-pub struct VerifierNode {
-    parent: VerifierNodeInternal,
-}
-impl VerifierNode {
-    pub fn new(proving_key_needed: bool) -> Self {
-        let parent = VerifierNodeInternal::new(proving_key_needed);
-        Self { parent }
-    }
+pub struct VerifierNode {}
 
-    pub fn get_proving_key(&mut self) -> Result<Vec<u8>, VerifierError> {
-        self.parent.get_proving_key()
-    }
-
-    pub fn verify(
-        &mut self,
-        proof: Vec<u8>,
-        deltas: Vec<String>,
-        plaintext_hash: BigUint,
-        labelsum_hash: BigUint,
-        zero_sum: BigUint,
-    ) -> Result<bool, VerifierError> {
-        self.parent
-            .verify(proof, deltas, plaintext_hash, labelsum_hash, zero_sum)
-    }
-
-    pub fn setup(&mut self, labels: &Vec<[u128; 2]>) {
-        self.parent.setup(labels)
-    }
-
-    pub fn receive_pt_hashes(&mut self, hashes: Vec<BigUint>) -> Vec<[Vec<u8>; 2]> {
-        self.parent.receive_pt_hashes(hashes)
-    }
-
-    pub fn receive_labelsum_hash(&mut self, hashes: Vec<BigUint>) -> (Vec<BigUint>, Vec<BigUint>) {
-        self.parent.receive_labelsum_hash(hashes)
-    }
-
-    pub fn verify_many(&mut self, proofs: Vec<Vec<u8>>) -> Result<bool, VerifierError> {
-        self.parent.verify_many(proofs)
-    }
-}
-
-// implementation of the Verifier using the node.js backend
-pub struct VerifierNodeInternal {
-    data: VerifierData,
-}
-
-impl VerifierNodeInternal {
-    pub fn new(proving_key_needed: bool) -> Self {
-        Self {
-            data: VerifierData::new(proving_key_needed),
-        }
-    }
-}
-
-impl Verifier for VerifierNodeInternal {
-    fn data(&mut self) -> &mut VerifierData {
-        &mut self.data
-    }
-
-    fn get_proving_key(&mut self) -> Result<Vec<u8>, VerifierError> {
-        if !Path::new("circuit_final.zkey.prover").exists() {
-            return Err(VerifierError::ProvingKeyNotFound);
-        }
-        let res = fs::read("circuit_final.zkey.prover");
-        if res.is_err() {
-            return Err(VerifierError::FileSystemError);
-        }
-        Ok(res.unwrap())
-    }
-
+impl Verify for VerifierNode {
     fn verify(
-        &mut self,
+        &self,
         proof: Vec<u8>,
         deltas: Vec<String>,
         plaintext_hash: BigUint,

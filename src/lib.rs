@@ -42,7 +42,7 @@ mod tests {
     use num::{BigUint, FromPrimitive};
     use prover::LabelsumProver;
     use rand::{thread_rng, Rng, RngCore};
-    use verifier::Verifier;
+    use verifier::LabelsumVerifier;
 
     fn random_bigint(bitsize: usize) -> BigUint {
         assert!(bitsize <= 128);
@@ -60,6 +60,10 @@ mod tests {
             .collect()
     }
 
+    fn type_of<T>(_: &T) -> &'static str {
+        std::any::type_name::<T>()
+    }
+
     #[test]
     fn e2e_test() {
         let prime = String::from(BN254_PRIME).parse::<BigUint>().unwrap();
@@ -68,6 +72,9 @@ mod tests {
         // OneTimeSetup is a no-op if the setup has been run before
         let mut ots = OneTimeSetup::new();
         ots.setup().unwrap();
+
+        // The Prover should have received the proving key out-of-band like this
+        let proving_key = ots.get_proving_key().unwrap();
 
         // Our Poseidon is 16-width, so one permutation processes:
         // 16 * 253 - 128 bits (salt) == 490 bytes. This is the size of the chunk.
@@ -91,11 +98,10 @@ mod tests {
         }
         let prover_labels = choose(&all_binary_labels, &u8vec_to_boolvec(&plaintext));
 
-        let mut verifier = VerifierNode::new(true);
-        // passing proving key to the Prover (if he needs one)
-        let proving_key = verifier.get_proving_key().unwrap();
-        // produce ciphertexts which are sent to Prover for decryption
-        verifier.setup(&all_binary_labels);
+        let mut verifier =
+            LabelsumVerifier::new(all_binary_labels, Box::new(verifiernode::VerifierNode {}));
+
+        let verifier = verifier.setup().unwrap();
 
         let prover = LabelsumProver::new(
             proving_key,
@@ -112,7 +118,7 @@ mod tests {
         let (plaintext_hash, prover) = prover.plaintext_commitment().unwrap();
 
         // Verifier sends back encrypted arithm. labels.
-        let cipheretexts = verifier.receive_pt_hashes(plaintext_hash);
+        let (cipheretexts, verifier) = verifier.receive_plaintext_hashes(plaintext_hash);
 
         // Hash commitment to the label_sum is sent to the Notary
         let (label_sum_hashes, prover) = prover
@@ -120,12 +126,16 @@ mod tests {
             .unwrap();
 
         // Notary sends zero_sum and all deltas
-        let (deltas, zero_sums) = verifier.receive_labelsum_hash(label_sum_hashes);
+        let (deltas, zero_sums, verifier) = verifier.receive_labelsum_hashes(label_sum_hashes);
 
         // Prover generates the proof
         let (proofs, prover) = prover.create_zk_proof(zero_sums, deltas).unwrap();
 
         // Verifier verifies the proof
-        assert_eq!(verifier.verify_many(proofs).unwrap(), true);
+        let verifier = verifier.verify_many(proofs).unwrap();
+        assert_eq!(
+            type_of(&verifier),
+            "labelsum::verifier::LabelsumVerifier<labelsum::verifier::VerificationSuccessfull>"
+        );
     }
 }

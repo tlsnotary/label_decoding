@@ -1,4 +1,5 @@
 use rand::{distributions::Alphanumeric, Rng};
+use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -18,7 +19,7 @@ impl OneTimeSetup {
         Self {}
     }
 
-    fn check_output(&mut self, output: Result<Output, std::io::Error>) -> Result<(), Error> {
+    fn check_output(&self, output: Result<Output, std::io::Error>) -> Result<(), Error> {
         if output.is_err() {
             return Err(Error::SnarkjsError);
         }
@@ -28,7 +29,7 @@ impl OneTimeSetup {
         Ok(())
     }
 
-    fn generate_entropy(&mut self) -> String {
+    fn generate_entropy(&self) -> String {
         let entropy: String = rand::thread_rng()
             .sample_iter(&Alphanumeric)
             .take(500)
@@ -38,7 +39,7 @@ impl OneTimeSetup {
         entropy
     }
 
-    pub fn setup(&mut self) -> Result<(), Error> {
+    pub fn setup(&self) -> Result<(), Error> {
         // check if files which we ship are present
         if !Path::new("powersOfTau28_hez_final_14.ptau").exists()
             || !Path::new("circuit.r1cs").exists()
@@ -59,8 +60,18 @@ impl OneTimeSetup {
         Ok(())
     }
 
+    // Returns the already existing proving key
+    pub fn get_proving_key(&self) -> Result<Vec<u8>, Error> {
+        let path = Path::new("circuit_final.zkey.prover");
+        if !path.exists() {
+            return Err(Error::FileDoesNotExist);
+        }
+        let proof = fs::read(path.clone()).unwrap();
+        Ok(proof)
+    }
+
     // this will work only if snarkjs is in the PATH
-    fn regenerate1(&mut self, entropy: String) -> Result<(), Error> {
+    fn regenerate1(&self, entropy: String) -> Result<(), Error> {
         let output = Command::new("snarkjs")
             .args([
                 "groth16",
@@ -98,7 +109,7 @@ impl OneTimeSetup {
     }
 
     // call a js wrapper which does what regenerate1() above does
-    fn regenerate2(&mut self, entropy: String) -> Result<(), Error> {
+    fn regenerate2(&self, entropy: String) -> Result<(), Error> {
         let output = Command::new("node")
             .args(["onetimesetup.mjs", &entropy])
             .output();
