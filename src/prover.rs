@@ -68,6 +68,7 @@ pub struct LabelsumCommitment {
 
 /// for uncommented fields see comments in [`LabelsumCommitment`]
 pub struct ProofCreation {
+    proving_key: Vec<u8>,
     plaintext: Vec<u8>,
     useful_bits: usize,
     chunks: Vec<Vec<BigUint>>,
@@ -101,7 +102,7 @@ pub trait Hash {
 }
 
 pub trait Prove {
-    fn prove(&self, input: &String) -> Result<Vec<u8>, ProverError>;
+    fn prove(&self, input: String, proving_key: &Vec<u8>) -> Result<Vec<u8>, ProverError>;
 }
 
 pub struct LabelsumProver<S = Setup>
@@ -283,6 +284,7 @@ impl LabelsumProver<LabelsumCommitment> {
                     chunk_size: self.state.chunk_size,
                     labelsum_hashes,
                     plaintext_hashes: self.state.plaintext_hashes,
+                    proving_key: self.state.proving_key,
                 },
                 poseidon: self.poseidon,
                 prover: self.prover,
@@ -347,7 +349,7 @@ impl LabelsumProver<ProofCreation> {
         let inputs = self.create_proof_inputs(zero_sum, deltas);
         let mut proofs = Vec::with_capacity(inputs.len());
         for input in inputs {
-            proofs.push(self.prover.prove(&input)?);
+            proofs.push(self.prover.prove(input, &self.state.proving_key)?);
         }
         Ok((
             proofs.clone(),

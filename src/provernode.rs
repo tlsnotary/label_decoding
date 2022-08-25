@@ -45,24 +45,29 @@ impl Hash for HasherNode {
 impl Prove for ProverNode {
     /// Produces a groth16 proof with snarkjs. Input must be a JSON string in the
     /// "input.json" format which snarkjs expects.
-    fn prove(&self, input: &String) -> Result<Vec<u8>, ProverError> {
+    fn prove(&self, input: String, proving_key: &Vec<u8>) -> Result<Vec<u8>, ProverError> {
         let mut path1 = temp_dir();
         let mut path2 = temp_dir();
+        let mut path3 = temp_dir();
         path1.push(format!("input.json.{}", Uuid::new_v4()));
-        path2.push(format!("proof.json.{}", Uuid::new_v4()));
+        path2.push(format!("proving_key.zkey.{}", Uuid::new_v4()));
+        path3.push(format!("proof.json.{}", Uuid::new_v4()));
 
         fs::write(path1.clone(), input).expect("Unable to write file");
+        fs::write(path2.clone(), proving_key).expect("Unable to write file");
         let output = Command::new("node")
             .args([
                 "prove.mjs",
                 path1.to_str().unwrap(),
                 path2.to_str().unwrap(),
+                path3.to_str().unwrap(),
             ])
             .output();
         fs::remove_file(path1).expect("Unable to remove file");
-        check_output(output)?;
-        let proof = fs::read(path2.clone()).unwrap();
         fs::remove_file(path2).expect("Unable to remove file");
+        check_output(output)?;
+        let proof = fs::read(path3.clone()).unwrap();
+        fs::remove_file(path3).expect("Unable to remove file");
         Ok(proof)
     }
 }
