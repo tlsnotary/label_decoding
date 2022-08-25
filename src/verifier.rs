@@ -1,3 +1,4 @@
+use super::ARITHMETIC_LABEL_SIZE;
 use aes::{Aes128, NewBlockCipher};
 use cipher::{consts::U16, generic_array::GenericArray, BlockCipher, BlockEncrypt};
 use derive_macro::{define_accessors_trait, VerifierDataGetSet};
@@ -83,12 +84,6 @@ impl LabelsumVerifier<Setup> {
     /// Convert binary labels into encrypted arithmetic labels.
     /// TODO more comments about this method
     pub fn setup(self) -> Result<LabelsumVerifier<ReceivePlaintextHashes>, VerifierError> {
-        // Generate as many 128-bit arithm label pairs as there are plaintext bits.
-        // The 128-bit size is for convenience to be able to encrypt the label with 1
-        // call to AES.
-        // To keep the handling simple, we want to avoid a negative delta, that's why
-        // W_0 and delta must be 127-bit values and W_1 will be set to W_0 + delta
-
         let bitsize = self.state.binary_labels.len();
         // TODO POSEIDON_WIDTH here
         // Compute useful bits from the field prime
@@ -98,6 +93,7 @@ impl LabelsumVerifier<Setup> {
 
         let mut zero_sums: Vec<BigUint> = Vec::with_capacity(chunk_count);
         let mut deltas: Vec<BigUint> = Vec::with_capacity(bitsize);
+        // Generate as many arithmetic label pairs as there are plaintext bits.
         let mut all_arithm_labels: Vec<[BigUint; 2]> = Vec::with_capacity(bitsize);
 
         for count in 0..chunk_count {
@@ -119,8 +115,11 @@ impl LabelsumVerifier<Setup> {
             all_arithm_labels.append(
                 &mut (count * chunk_size..end)
                     .map(|_| {
-                        let zero_label = random_bigint(127);
-                        let delta = random_bigint(127);
+                        // To keep the handling simple, we want to avoid a negative delta, that's why
+                        // W_0 and delta must be (ARITHMETIC_LABEL_SIZE - 1)-bit values and W_1 will be
+                        // set to W_0 + delta
+                        let zero_label = random_bigint(ARITHMETIC_LABEL_SIZE - 1);
+                        let delta = random_bigint(ARITHMETIC_LABEL_SIZE - 1);
                         let one_label = zero_label.clone() + delta.clone();
                         zero_sum += zero_label.clone();
                         deltas.push(delta);

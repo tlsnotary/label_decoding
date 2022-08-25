@@ -16,6 +16,16 @@ const BN254_PRIME: &str =
 const POSEIDON_WIDTH: usize = 16;
 /// How many permutations our circom circuit supports.
 const PERMUTATION_COUNT: usize = 1;
+/// The bitsize of an arithmetic label. MUST be > 40 to give statistical
+/// security against the Prover guessing the label. For a 254-bit field,
+/// the bitsize > 96 would require 2 field elements for the
+/// salted labelsum instead of 1.
+const ARITHMETIC_LABEL_SIZE: usize = 96;
+
+/// The maximum size (in bits) of one chunk of plaintext that we support
+/// for 254-bit fields. Calculated as 2^{Field_size - 1 - 128 - 96}, where
+/// 128 is the size of salt and 96 is the size of the arithmetic label.  
+const MAX_CHUNK_SIZE: usize = 2 << 28;
 
 pub trait VerifierCore {
     fn get_proving_key(&mut self) -> Result<Vec<u8>, VerifierError>;
@@ -70,10 +80,11 @@ mod tests {
         let mut rng = thread_rng();
 
         // OneTimeSetup is a no-op if the setup has been run before
-        let mut ots = OneTimeSetup::new();
+        let ots = OneTimeSetup::new();
         ots.setup().unwrap();
 
-        // The Prover should have received the proving key out-of-band like this
+        // The Prover should have received the proving key (before the labelsum
+        // protocol starts) like this:
         let proving_key = ots.get_proving_key().unwrap();
 
         // Our Poseidon is 16-width, so one permutation processes:
@@ -98,7 +109,7 @@ mod tests {
         }
         let prover_labels = choose(&all_binary_labels, &u8vec_to_boolvec(&plaintext));
 
-        let mut verifier =
+        let verifier =
             LabelsumVerifier::new(all_binary_labels, Box::new(verifiernode::VerifierNode {}));
 
         let verifier = verifier.setup().unwrap();

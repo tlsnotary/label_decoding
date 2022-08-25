@@ -10,7 +10,7 @@ use std::marker::PhantomData;
 use std::process::{Command, Output};
 use uuid::Uuid;
 
-use super::{PERMUTATION_COUNT, POSEIDON_WIDTH};
+use super::{MAX_CHUNK_SIZE, PERMUTATION_COUNT, POSEIDON_WIDTH};
 
 #[derive(Debug)]
 pub enum ProverError {
@@ -22,6 +22,7 @@ pub enum ProverError {
     SnarkjsError,
     IncorrectEncryptedLabelSize,
     ErrorInPoseidonImplementation,
+    MaxChunkSizeExceeded,
 }
 
 pub trait State {}
@@ -147,6 +148,9 @@ impl LabelsumProver<Setup> {
         let useful_bits = self.calculate_useful_bits(&self.state.field_prime);
         let (chunk_size, chunks, salts) =
             self.plaintext_to_chunks(useful_bits, &self.state.plaintext);
+        if chunk_size > MAX_CHUNK_SIZE {
+            return Err(ProverError::MaxChunkSizeExceeded);
+        }
 
         Ok(LabelsumProver {
             state: PlaintextCommitment {
