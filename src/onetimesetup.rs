@@ -49,7 +49,7 @@ impl OneTimeSetup {
         // check if any of the files hasn't been generated. If so, regenerate
         // all files.
         if !Path::new("circuit_0000.zkey").exists()
-            || !Path::new("circuit_final.zkey.prover").exists()
+            || !Path::new("circuit_final.zkey.notary").exists()
             || !Path::new("verification_key.json").exists()
         {
             let entropy = self.generate_entropy();
@@ -62,7 +62,7 @@ impl OneTimeSetup {
 
     // Returns the already existing proving key
     pub fn get_proving_key(&self) -> Result<Vec<u8>, Error> {
-        let path = Path::new("circuit_final.zkey.prover");
+        let path = Path::new("circuit_final.zkey.notary");
         if !path.exists() {
             return Err(Error::FileDoesNotExist);
         }
@@ -88,7 +88,7 @@ impl OneTimeSetup {
                 "zkey",
                 "contribute",
                 "circuit_0000.zkey",
-                "circuit_final.zkey",
+                "circuit_final.zkey.notary",
                 &(String::from("-e=\"") + &entropy + &String::from("\"")),
             ])
             .output();
@@ -99,7 +99,7 @@ impl OneTimeSetup {
                 "zkey",
                 "export",
                 "verificationkey",
-                "circuit_final.zkey",
+                "circuit_final.zkey.notary",
                 "verification_key.json",
             ])
             .output();

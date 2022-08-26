@@ -1,7 +1,6 @@
-use super::ARITHMETIC_LABEL_SIZE;
+use super::{random_bigint, ARITHMETIC_LABEL_SIZE};
 use aes::{Aes128, NewBlockCipher};
 use cipher::{consts::U16, generic_array::GenericArray, BlockCipher, BlockEncrypt};
-use derive_macro::{define_accessors_trait, VerifierDataGetSet};
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
 use rand::{thread_rng, Rng};
 
@@ -274,40 +273,4 @@ impl LabelsumVerifier<VerifyMany> {
             verifier: self.verifier,
         })
     }
-}
-
-fn random_bigint(bitsize: usize) -> BigUint {
-    assert!(bitsize <= 128);
-    let r: [u8; 16] = thread_rng().gen();
-    // take only those bits which we need
-    BigUint::from_bytes_be(&boolvec_to_u8vec(&u8vec_to_boolvec(&r)[0..bitsize]))
-}
-
-#[inline]
-fn u8vec_to_boolvec(v: &[u8]) -> Vec<bool> {
-    let mut bv = Vec::with_capacity(v.len() * 8);
-    for byte in v.iter() {
-        for i in 0..8 {
-            bv.push(((byte >> (7 - i)) & 1) != 0);
-        }
-    }
-    bv
-}
-
-// Convert bits into bytes. The bits will be left-padded with zeroes to the
-// multiple of 8.
-#[inline]
-fn boolvec_to_u8vec(bv: &[bool]) -> Vec<u8> {
-    let rem = bv.len() % 8;
-    let first_byte_bitsize = if rem == 0 { 8 } else { rem };
-    let offset = if rem == 0 { 0 } else { 1 };
-    let mut v = vec![0u8; bv.len() / 8 + offset];
-    // implicitely left-pad the first byte with zeroes
-    for (i, b) in bv[0..first_byte_bitsize].iter().enumerate() {
-        v[i / 8] |= (*b as u8) << (first_byte_bitsize - 1 - i);
-    }
-    for (i, b) in bv[first_byte_bitsize..].iter().enumerate() {
-        v[1 + i / 8] |= (*b as u8) << (7 - (i % 8));
-    }
-    v
 }

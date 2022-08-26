@@ -27,7 +27,7 @@ async function main(){
     await snarkjs.zKey.newZKey(r1cs, ptau, zkey_0);
 
     // snarkjs zkey contribute circuit_0000.zkey circuit_final.zkey -e="<Notary's entropy>"
-    const zkey_final = {type: "file", fileName: "circuit_final.zkey.prover"};
+    const zkey_final = {type: "file", fileName: "circuit_final.zkey.notary"};
     await createOverride(zkey_final);
     console.log("zkey contribute...");
     await snarkjs.zKey.contribute(zkey_0, zkey_final, "", entropy);

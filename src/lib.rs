@@ -1,5 +1,5 @@
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
-use verifier::VerifierError;
+use rand::{thread_rng, Rng};
 
 pub mod onetimesetup;
 pub mod prover;
@@ -28,26 +28,45 @@ const ARITHMETIC_LABEL_SIZE: usize = 96;
 /// 128 is the size of salt and 96 is the size of the arithmetic label.  
 const MAX_CHUNK_SIZE: usize = 1 << 29;
 
-pub trait VerifierCore {
-    fn get_proving_key(&mut self) -> Result<Vec<u8>, VerifierError>;
+pub fn random_bigint(bitsize: usize) -> BigUint {
+    assert!(bitsize <= 128);
+    let r: [u8; 16] = thread_rng().gen();
+    // take only those bits which we need
+    BigUint::from_bytes_be(&boolvec_to_u8vec(&u8vec_to_boolvec(&r)[0..bitsize]))
+}
 
-    fn verify(
-        &mut self,
-        proof: Vec<u8>,
-        deltas: Vec<String>,
-        plaintext_hash: BigUint,
-        labelsum_hash: BigUint,
-        zero_sum: BigUint,
-    ) -> Result<bool, VerifierError>;
+#[inline]
+pub fn u8vec_to_boolvec(v: &[u8]) -> Vec<bool> {
+    let mut bv = Vec::with_capacity(v.len() * 8);
+    for byte in v.iter() {
+        for i in 0..8 {
+            bv.push(((byte >> (7 - i)) & 1) != 0);
+        }
+    }
+    bv
+}
+
+// Convert bits into bytes. The bits will be left-padded with zeroes to the
+// multiple of 8.
+#[inline]
+pub fn boolvec_to_u8vec(bv: &[bool]) -> Vec<u8> {
+    let rem = bv.len() % 8;
+    let first_byte_bitsize = if rem == 0 { 8 } else { rem };
+    let offset = if rem == 0 { 0 } else { 1 };
+    let mut v = vec![0u8; bv.len() / 8 + offset];
+    // implicitely left-pad the first byte with zeroes
+    for (i, b) in bv[0..first_byte_bitsize].iter().enumerate() {
+        v[i / 8] |= (*b as u8) << (first_byte_bitsize - 1 - i);
+    }
+    for (i, b) in bv[first_byte_bitsize..].iter().enumerate() {
+        v[1 + i / 8] |= (*b as u8) << (7 - (i % 8));
+    }
+    v
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        onetimesetup::OneTimeSetup,
-        prover::{boolvec_to_u8vec, u8vec_to_boolvec},
-        verifiernode::VerifierNode,
-    };
+    use crate::onetimesetup::OneTimeSetup;
 
     use super::*;
     use num::{BigUint, FromPrimitive};
@@ -55,12 +74,6 @@ mod tests {
     use rand::{thread_rng, Rng, RngCore};
     use verifier::LabelsumVerifier;
 
-    fn random_bigint(bitsize: usize) -> BigUint {
-        assert!(bitsize <= 128);
-        let r: [u8; 16] = thread_rng().gen();
-        // take only those bits which we need
-        BigUint::from_bytes_be(&boolvec_to_u8vec(&u8vec_to_boolvec(&r)[0..bitsize]))
-    }
     /// Unzips a slice of pairs, returning items corresponding to choice
     fn choose<T: Clone>(items: &[[T; 2]], choice: &[bool]) -> Vec<T> {
         assert!(items.len() == choice.len(), "arrays are different length");

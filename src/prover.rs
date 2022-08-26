@@ -1,6 +1,5 @@
 use aes::{Aes128, BlockDecrypt, NewBlockCipher};
 use cipher::{consts::U16, generic_array::GenericArray};
-use derive_macro::{define_accessors_trait, ProverDataGetSet};
 use json::{object, stringify_pretty};
 use num::{BigUint, FromPrimitive};
 use rand::{thread_rng, Rng};
@@ -10,7 +9,10 @@ use std::marker::PhantomData;
 use std::process::{Command, Output};
 use uuid::Uuid;
 
-use super::{ARITHMETIC_LABEL_SIZE, MAX_CHUNK_SIZE, PERMUTATION_COUNT, POSEIDON_WIDTH};
+use super::{
+    boolvec_to_u8vec, u8vec_to_boolvec, ARITHMETIC_LABEL_SIZE, MAX_CHUNK_SIZE, PERMUTATION_COUNT,
+    POSEIDON_WIDTH,
+};
 
 #[derive(Debug)]
 pub enum ProverError {
@@ -435,35 +437,6 @@ impl LabelsumProver<ProofCreation> {
         }
         inputs
     }
-}
-
-#[inline]
-pub fn u8vec_to_boolvec(v: &[u8]) -> Vec<bool> {
-    let mut bv = Vec::with_capacity(v.len() * 8);
-    for byte in v.iter() {
-        for i in 0..8 {
-            bv.push(((byte >> (7 - i)) & 1) != 0);
-        }
-    }
-    bv
-}
-
-// Convert bits into bytes. The bits will be left-padded with zeroes to the
-// multiple of 8.
-#[inline]
-pub fn boolvec_to_u8vec(bv: &[bool]) -> Vec<u8> {
-    let rem = bv.len() % 8;
-    let first_byte_bitsize = if rem == 0 { 8 } else { rem };
-    let offset = if rem == 0 { 0 } else { 1 };
-    let mut v = vec![0u8; bv.len() / 8 + offset];
-    // implicitely left-pad the first byte with zeroes
-    for (i, b) in bv[0..first_byte_bitsize].iter().enumerate() {
-        v[i / 8] |= (*b as u8) << (first_byte_bitsize - 1 - i);
-    }
-    for (i, b) in bv[first_byte_bitsize..].iter().enumerate() {
-        v[1 + i / 8] |= (*b as u8) << (7 - (i % 8));
-    }
-    v
 }
 
 #[cfg(test)]

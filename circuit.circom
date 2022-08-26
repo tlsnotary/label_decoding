@@ -50,7 +50,7 @@ template Main() {
     }
     
     component ls_hash = Poseidon(1);
-    // shift sum to the left and put salt into the last 128 bits
+    // shift the sum to the left and put the salt into the last 128 bits
     ls_hash.inputs[0] <== (sum_of_zero_labels + sum_of_deltas[w]) * (1 << 128) + labelsum_salt;
     log(3);
     label_sum_hash === ls_hash.out;

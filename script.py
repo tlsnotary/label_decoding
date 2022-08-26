@@ -163,6 +163,6 @@ if __name__ == '__main__':
 
 
     main += 'component main {public [plaintext_hash, label_sum_hash, delta, sum_of_zero_labels]} = Main();'
-    with open('circuit.circom', 'w') as f:
+    with open('test.circom', 'w') as f:
         f.write(main)
     
