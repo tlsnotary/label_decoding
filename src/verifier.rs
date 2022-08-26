@@ -1,8 +1,15 @@
-use super::{random_bigint, ARITHMETIC_LABEL_SIZE};
+use crate::boolvec_to_u8vec;
+
+use super::{random_bigint, ARITHMETIC_LABEL_SIZE, POSEIDON_WIDTH};
+use crate::label::{LabelGenerator, LabelPair, Seed};
 use aes::{Aes128, NewBlockCipher};
 use cipher::{consts::U16, generic_array::GenericArray, BlockCipher, BlockEncrypt};
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
+use rand::SeedableRng;
 use rand::{thread_rng, Rng};
+use rand_chacha::ChaCha20Rng;
+// The PRG we use to generate arithmetic labels
+type Prg = ChaCha20Rng;
 
 #[derive(Debug)]
 pub enum VerifierError {
@@ -21,8 +28,12 @@ pub struct Setup {
 
 pub struct ReceivePlaintextHashes {
     deltas: Vec<BigUint>,
+    /// The sum of all arithmetic labels with the semantic value 0. One sum
+    /// for each chunk of the plaintext.
     zero_sums: Vec<BigUint>,
     ciphertexts: Vec<[Vec<u8>; 2]>,
+    /// The PRG seed from which all arithmetic labels were generated
+    arith_label_seed: Seed,
 }
 
 pub struct ReceiveLabelsumHashes {
@@ -30,6 +41,7 @@ pub struct ReceiveLabelsumHashes {
     zero_sums: Vec<BigUint>,
     // hashes for each chunk of Prover's plaintext
     plaintext_hashes: Vec<BigUint>,
+    arith_label_seed: [u8; 32],
 }
 
 pub struct VerifyMany {
@@ -80,52 +92,34 @@ impl LabelsumVerifier {
 }
 
 impl LabelsumVerifier<Setup> {
-    /// Convert binary labels into encrypted arithmetic labels.
-    /// TODO more comments about this method
+    /// Generates arith. labels from a seed and encrypts them using binary labels
+    /// as encryption keys.
     pub fn setup(self) -> Result<LabelsumVerifier<ReceivePlaintextHashes>, VerifierError> {
-        let bitsize = self.state.binary_labels.len();
-        // TODO POSEIDON_WIDTH here
+        let plaintext_bitsize = self.state.binary_labels.len();
         // Compute useful bits from the field prime
-        let chunk_size = 253 * 16 - 128;
+        let chunk_size = 253 * POSEIDON_WIDTH - 128;
         // count of chunks rounded up
-        let chunk_count = (bitsize + (chunk_size - 1)) / chunk_size;
+        let chunk_count = (plaintext_bitsize + (chunk_size - 1)) / chunk_size;
 
+        // There will be as many zero_sums as there are chunks
         let mut zero_sums: Vec<BigUint> = Vec::with_capacity(chunk_count);
-        let mut deltas: Vec<BigUint> = Vec::with_capacity(bitsize);
-        // Generate as many arithmetic label pairs as there are plaintext bits.
-        let mut all_arithm_labels: Vec<[BigUint; 2]> = Vec::with_capacity(bitsize);
 
-        for count in 0..chunk_count {
-            // calculate zero_sum for each chunk of plaintext separately
+        // There will be as many deltas as there are plaintext bits.
+        let mut deltas: Vec<BigUint> = Vec::with_capacity(plaintext_bitsize);
+
+        // Generate arithmetic label pairs and split them into chunks
+        let generator = LabelGenerator::new();
+        let (label_pairs, seed, _generator) =
+            generator.generate(plaintext_bitsize, ARITHMETIC_LABEL_SIZE);
+        let label_pair_chunks = label_pairs.chunks(chunk_size);
+
+        // Calculate deltas and zero_sums for each chunk
+        for chunk in label_pair_chunks {
             let mut zero_sum = BigUint::from_u8(0).unwrap();
-            // end of range is different for the last chunk
-            let end = if count < chunk_count - 1 {
-                (count + 1) * chunk_size
-            } else {
-                // compute the size of the gap at the end of the last chunk
-                let last_size = bitsize % chunk_size;
-                let gap_size = if last_size == 0 {
-                    0
-                } else {
-                    chunk_size - last_size
-                };
-                (count + 1) * chunk_size - gap_size
-            };
-            all_arithm_labels.append(
-                &mut (count * chunk_size..end)
-                    .map(|_| {
-                        // To keep the handling simple, we want to avoid a negative delta, that's why
-                        // W_0 and delta must be (ARITHMETIC_LABEL_SIZE - 1)-bit values and W_1 will be
-                        // set to W_0 + delta
-                        let zero_label = random_bigint(ARITHMETIC_LABEL_SIZE - 1);
-                        let delta = random_bigint(ARITHMETIC_LABEL_SIZE - 1);
-                        let one_label = zero_label.clone() + delta.clone();
-                        zero_sum += zero_label.clone();
-                        deltas.push(delta);
-                        [zero_label, one_label]
-                    })
-                    .collect(),
-            );
+            for label_pair in chunk {
+                zero_sum += label_pair[0].clone();
+                deltas.push(label_pair[1].clone() - label_pair[0].clone());
+            }
             zero_sums.push(zero_sum);
         }
 
@@ -135,7 +129,7 @@ impl LabelsumVerifier<Setup> {
             .state
             .binary_labels
             .iter()
-            .zip(all_arithm_labels)
+            .zip(label_pairs)
             .map(|(bin_pair, arithm_pair)| {
                 let zero_key = Aes128::new_from_slice(&bin_pair[0].to_be_bytes()).unwrap();
                 let one_key = Aes128::new_from_slice(&bin_pair[1].to_be_bytes()).unwrap();
@@ -167,6 +161,7 @@ impl LabelsumVerifier<Setup> {
                 zero_sums,
                 deltas,
                 ciphertexts,
+                arith_label_seed: seed,
             },
             verifier: self.verifier,
         })
@@ -186,6 +181,7 @@ impl LabelsumVerifier<ReceivePlaintextHashes> {
                     zero_sums: self.state.zero_sums,
                     deltas: self.state.deltas,
                     plaintext_hashes,
+                    arith_label_seed: self.state.arith_label_seed,
                 },
                 verifier: self.verifier,
             },
@@ -194,15 +190,14 @@ impl LabelsumVerifier<ReceivePlaintextHashes> {
 }
 
 impl LabelsumVerifier<ReceiveLabelsumHashes> {
-    // receive the hash commitment to the Prover's sum of labels and reveal all
-    // deltas and zero_sums.
+    // receive the hash commitment to the Prover's sum of labels and reveal
+    // the arithmetic label seed
     pub fn receive_labelsum_hashes(
         self,
         labelsum_hashes: Vec<BigUint>,
-    ) -> (Vec<BigUint>, Vec<BigUint>, LabelsumVerifier<VerifyMany>) {
+    ) -> (Seed, LabelsumVerifier<VerifyMany>) {
         (
-            self.state.deltas.clone(),
-            self.state.zero_sums.clone(),
+            self.state.arith_label_seed,
             LabelsumVerifier {
                 state: VerifyMany {
                     zero_sums: self.state.zero_sums,

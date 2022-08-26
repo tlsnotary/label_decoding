@@ -1,6 +1,8 @@
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
 use rand::{thread_rng, Rng};
+use sha2::{Digest, Sha256};
 
+pub mod label;
 pub mod onetimesetup;
 pub mod prover;
 pub mod provernode;
@@ -64,6 +66,12 @@ pub fn boolvec_to_u8vec(bv: &[bool]) -> Vec<u8> {
     v
 }
 
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::onetimesetup::OneTimeSetup;
@@ -101,12 +109,10 @@ mod tests {
         // protocol starts) like this:
         let proving_key = ots.get_proving_key().unwrap();
 
-        // Our Poseidon is 16-width, so one permutation processes:
-        // 16 * 253 - 128 bits (salt) == 490 bytes. This is the size of the chunk.
-
-        // generate random plaintext of random size in range (0, 2000)
-        let mut plaintext = vec![0u8; rng.gen_range(0..2000)];
-        rng.fill_bytes(&mut plaintext);
+        // generate random plaintext of random size up to 2000 bytes
+        let plaintext: Vec<u8> = core::iter::repeat_with(|| rng.gen::<u8>())
+            .take(thread_rng().gen_range(0..2000))
+            .collect();
 
         // Normally, the Prover is expected to obtain her binary labels by
         // evaluating the garbled circuit.
@@ -147,11 +153,19 @@ mod tests {
 
         // Hash commitment to the label_sum is sent to the Notary
         let (label_sum_hashes, prover) = prover
-            .labelsum_commitment(&cipheretexts, &prover_labels)
+            .labelsum_commitment(cipheretexts, &prover_labels)
             .unwrap();
 
-        // Notary sends zero_sum and all deltas
-        let (deltas, zero_sums, verifier) = verifier.receive_labelsum_hashes(label_sum_hashes);
+        // Notary sends the arithmetic label seed
+        let (seed, verifier) = verifier.receive_labelsum_hashes(label_sum_hashes);
+
+        // At this point Notary reveals the GC seed in the committed GC protocol.
+        // Prover waits for a signal from that protocol that binary labels which
+        // the Prover used earlier were authentic.
+        let prover = prover.binary_labels_authenticated(true).unwrap();
+
+        // Prover checks the integrity of the arithmetic labels and generates zero_sums and deltas
+        let (zero_sums, deltas, prover) = prover.authenticate_arithmetic_labels(seed).unwrap();
 
         // Prover generates the proof
         let (proofs, prover) = prover.create_zk_proof(zero_sums, deltas).unwrap();

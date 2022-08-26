@@ -1,3 +1,4 @@
+use crate::label::{LabelGenerator, LabelPair, Seed};
 use aes::{Aes128, BlockDecrypt, NewBlockCipher};
 use cipher::{consts::U16, generic_array::GenericArray};
 use json::{object, stringify_pretty};
@@ -10,8 +11,8 @@ use std::process::{Command, Output};
 use uuid::Uuid;
 
 use super::{
-    boolvec_to_u8vec, u8vec_to_boolvec, ARITHMETIC_LABEL_SIZE, MAX_CHUNK_SIZE, PERMUTATION_COUNT,
-    POSEIDON_WIDTH,
+    boolvec_to_u8vec, sha256, u8vec_to_boolvec, ARITHMETIC_LABEL_SIZE, MAX_CHUNK_SIZE,
+    PERMUTATION_COUNT, POSEIDON_WIDTH,
 };
 
 #[derive(Debug)]
@@ -25,6 +26,7 @@ pub enum ProverError {
     IncorrectEncryptedLabelSize,
     ErrorInPoseidonImplementation,
     MaxChunkSizeExceeded,
+    BinaryLabelsAuthenticationFailed,
 }
 
 pub trait State {}
@@ -71,6 +73,38 @@ pub struct LabelsumCommitment {
 }
 
 /// for uncommented fields see comments in [`LabelsumCommitment`]
+pub struct BinaryLabelsAuthenticated {
+    proving_key: Vec<u8>,
+    plaintext: Vec<u8>,
+    useful_bits: usize,
+    chunks: Vec<Vec<BigUint>>,
+    chunk_size: usize,
+    /// hashes of the sums of arithmetic labels for each chunk of plaintext
+    labelsum_hashes: Vec<BigUint>,
+    plaintext_hashes: Vec<BigUint>,
+    salts: Vec<BigUint>,
+    // Hash of the ciphertext of arithmetic labels. We will check against
+    // it during the authentication of the arithmetic labels.
+    alct_hash: [u8; 32],
+}
+
+/// for uncommented fields see comments in [`LabelsumCommitment`]
+pub struct AuthenticateArithmeticLabels {
+    proving_key: Vec<u8>,
+    plaintext: Vec<u8>,
+    useful_bits: usize,
+    chunks: Vec<Vec<BigUint>>,
+    chunk_size: usize,
+    /// hashes of the sums of arithmetic labels for each chunk of plaintext
+    labelsum_hashes: Vec<BigUint>,
+    plaintext_hashes: Vec<BigUint>,
+    salts: Vec<BigUint>,
+    // Hash of the ciphertext of arithmetic labels. We will check against
+    // it during the authentication of the arithmetic labels.
+    alct_hash: [u8; 32],
+}
+
+/// for uncommented fields see comments in [`LabelsumCommitment`]
 pub struct ProofCreation {
     proving_key: Vec<u8>,
     plaintext: Vec<u8>,
@@ -99,6 +133,8 @@ pub struct ProofReady {
 impl State for Setup {}
 impl State for PlaintextCommitment {}
 impl State for LabelsumCommitment {}
+impl State for BinaryLabelsAuthenticated {}
+impl State for AuthenticateArithmeticLabels {}
 impl State for ProofCreation {}
 impl State for ProofReady {}
 
@@ -264,14 +300,25 @@ impl LabelsumProver<PlaintextCommitment> {
 }
 
 impl LabelsumProver<LabelsumCommitment> {
-    // Computes the sum of all arithmetic labels for each chunk of plaintext.
+    /// Computes the sum of all arithmetic labels for each chunk of plaintext.
     /// Returns the hash of each sum.
     pub fn labelsum_commitment(
         self,
-        ciphertexts: &Vec<[Vec<u8>; 2]>,
+        ciphertexts: Vec<[Vec<u8>; 2]>,
         labels: &Vec<u128>,
-    ) -> Result<(Vec<BigUint>, LabelsumProver<ProofCreation>), ProverError> {
-        let sums = self.compute_label_sums(ciphertexts, labels)?;
+    ) -> Result<(Vec<BigUint>, LabelsumProver<BinaryLabelsAuthenticated>), ProverError> {
+        let sums = self.compute_label_sums(&ciphertexts, labels)?;
+
+        // flatten the ciphertexts and hash them
+        let flat: Vec<u8> = ciphertexts
+            .iter()
+            .map(|pair| {
+                let v = pair.to_vec();
+                v.into_iter().flatten().collect::<Vec<u8>>()
+            })
+            .flatten()
+            .collect();
+        let alct_hash = sha256(&flat);
 
         let res: Result<Vec<BigUint>, ProverError> = sums
             .iter()
@@ -303,7 +350,7 @@ impl LabelsumProver<LabelsumCommitment> {
         Ok((
             labelsum_hashes.clone(),
             LabelsumProver {
-                state: ProofCreation {
+                state: BinaryLabelsAuthenticated {
                     useful_bits: self.state.useful_bits,
                     plaintext: self.state.plaintext,
                     chunks: self.state.chunks,
@@ -312,6 +359,7 @@ impl LabelsumProver<LabelsumCommitment> {
                     plaintext_hashes: self.state.plaintext_hashes,
                     proving_key: self.state.proving_key,
                     salts: self.state.salts,
+                    alct_hash,
                 },
                 poseidon: self.poseidon,
                 prover: self.prover,
@@ -362,6 +410,60 @@ impl LabelsumProver<LabelsumCommitment> {
             label_sum_hashes.push(label_sum);
         }
         Ok(label_sum_hashes)
+    }
+}
+
+impl LabelsumProver<BinaryLabelsAuthenticated> {
+    /// A signal whether the committed GC protocol succesfully authenticated
+    /// the output labels which we used earlier in the protocol.
+    pub fn binary_labels_authenticated(
+        self,
+        success: bool,
+    ) -> Result<LabelsumProver<AuthenticateArithmeticLabels>, ProverError> {
+        if success {
+            Ok(LabelsumProver {
+                state: AuthenticateArithmeticLabels {
+                    useful_bits: self.state.useful_bits,
+                    plaintext: self.state.plaintext,
+                    chunks: self.state.chunks,
+                    chunk_size: self.state.chunk_size,
+                    labelsum_hashes: self.state.labelsum_hashes,
+                    plaintext_hashes: self.state.plaintext_hashes,
+                    proving_key: self.state.proving_key,
+                    salts: self.state.salts,
+                    alct_hash: self.state.alct_hash,
+                },
+                poseidon: self.poseidon,
+                prover: self.prover,
+            })
+        } else {
+            Err(ProverError::BinaryLabelsAuthenticationFailed)
+        }
+    }
+}
+
+impl LabelsumProver<AuthenticateArithmeticLabels> {
+    pub fn authenticate_arithmetic_labels(
+        self,
+        seed: Seed,
+    ) -> Result<LabelsumProver<ProofCreation>, ProverError> {
+        let gen = LabelGenerator::new_from_seed(seed);
+        let label_pairs = gen.generate(self.state.plaintext.len() * 8, ARITHMETIC_LABEL_SIZE);
+
+        Ok(LabelsumProver {
+            state: ProofCreation {
+                useful_bits: self.state.useful_bits,
+                plaintext: self.state.plaintext,
+                chunks: self.state.chunks,
+                chunk_size: self.state.chunk_size,
+                labelsum_hashes: self.state.labelsum_hashes,
+                plaintext_hashes: self.state.plaintext_hashes,
+                proving_key: self.state.proving_key,
+                salts: self.state.salts,
+            },
+            poseidon: self.poseidon,
+            prover: self.prover,
+        })
     }
 }
 
