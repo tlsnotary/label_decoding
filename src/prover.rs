@@ -10,7 +10,7 @@ use std::marker::PhantomData;
 use std::process::{Command, Output};
 use uuid::Uuid;
 
-use super::{MAX_CHUNK_SIZE, PERMUTATION_COUNT, POSEIDON_WIDTH};
+use super::{ARITHMETIC_LABEL_SIZE, MAX_CHUNK_SIZE, PERMUTATION_COUNT, POSEIDON_WIDTH};
 
 #[derive(Debug)]
 pub enum ProverError {
@@ -48,6 +48,7 @@ pub struct PlaintextCommitment {
     chunks: Vec<Vec<BigUint>>,
     /// each chunk's last 128 bits are used for the salt. w/o the salt, hashes
     /// of plaintext with low entropy could be brute-forced.
+    /// The labelsum of a chunk also gets salted with the same salt as the chunk.
     salts: Vec<BigUint>,
     /// the size of one chunk of plaintext (not counting the salt) ==
     /// useful_bits * POSEIDON_WIDTH - 128 (salt size)
@@ -77,6 +78,7 @@ pub struct ProofCreation {
     /// hashes of the sums of arithmetic labels for each chunk of plaintext
     labelsum_hashes: Vec<BigUint>,
     plaintext_hashes: Vec<BigUint>,
+    salts: Vec<BigUint>,
 }
 
 pub struct ProofReady {
@@ -85,8 +87,8 @@ pub struct ProofReady {
     /// circuit. Decoded output labels is the plaintext. One proof corresponds
     /// to one chunk of the plaintext.
     proofs: Vec<Vec<u8>>,
-    // TODO: having chunks is enough to derive plaintext and plaintext_hashes.
-    // The chunks contain plaintext and salt
+    // TODO: having just `chunks` is enough to derive `plaintext` and
+    // `plaintext_hashes` since the chunks contain plaintext and salt.
     chunks: Vec<Vec<BigUint>>,
     plaintext: Vec<u8>,
     plaintext_hashes: Vec<BigUint>,
@@ -271,7 +273,25 @@ impl LabelsumProver<LabelsumCommitment> {
 
         let res: Result<Vec<BigUint>, ProverError> = sums
             .iter()
-            .map(|sum| Ok(self.poseidon.hash(&vec![sum.clone()])?))
+            .zip(self.state.salts.iter())
+            .map(|(sum, salt)| {
+                let sum = u8vec_to_boolvec(&sum.to_bytes_be());
+                let salt = u8vec_to_boolvec(&salt.to_bytes_be());
+
+                // We want to pack `sum` and `salt` into a field element like this:
+                // | leading zeroes | sum |       salt        |
+                //                         \                 /
+                //                          \ last 128 bits /
+
+                let salted_sum_len = self.state.useful_bits;
+                let mut salted_sum = vec![false; salted_sum_len];
+                salted_sum[salted_sum_len - salt.len()..].copy_from_slice(&salt);
+                salted_sum[salted_sum_len - 128 - sum.len()..salted_sum_len - 128]
+                    .copy_from_slice(&sum);
+                let salted_sum = BigUint::from_bytes_be(&boolvec_to_u8vec(&salted_sum));
+
+                Ok(self.poseidon.hash(&vec![salted_sum.clone()])?)
+            })
             .collect();
         if res.is_err() {
             return Err(ProverError::ErrorInPoseidonImplementation);
@@ -289,6 +309,7 @@ impl LabelsumProver<LabelsumCommitment> {
                     labelsum_hashes,
                     plaintext_hashes: self.state.plaintext_hashes,
                     proving_key: self.state.proving_key,
+                    salts: self.state.salts,
                 },
                 poseidon: self.poseidon,
                 prover: self.prover,
@@ -404,8 +425,9 @@ impl LabelsumProver<ProofCreation> {
                 label_sum_hash: self.state.labelsum_hashes[count].to_string(),
                 sum_of_zero_labels: zero_sum[count].to_string(),
                 plaintext: plaintext,
+                labelsum_salt: self.state.salts[count].to_string(),
                 delta: deltas_fes[0..deltas_fes.len()-1],
-                // last field element's deltas form a separate input
+                // last field element's deltas are a separate input
                 delta_last: deltas_fes[deltas_fes.len()-1]
             };
             let s = stringify_pretty(input, 4);

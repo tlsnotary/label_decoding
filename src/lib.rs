@@ -14,7 +14,8 @@ const BN254_PRIME: &str =
 
 /// How many field elements our Poseidon hash consumes for one permutation.
 const POSEIDON_WIDTH: usize = 16;
-/// How many permutations our circom circuit supports.
+/// How many permutations our circom circuit supports. One permutation consumes
+/// POSEIDON_WIDTH field elements.
 const PERMUTATION_COUNT: usize = 1;
 /// The bitsize of an arithmetic label. MUST be > 40 to give statistical
 /// security against the Prover guessing the label. For a 254-bit field,
@@ -25,7 +26,7 @@ const ARITHMETIC_LABEL_SIZE: usize = 96;
 /// The maximum size (in bits) of one chunk of plaintext that we support
 /// for 254-bit fields. Calculated as 2^{Field_size - 1 - 128 - 96}, where
 /// 128 is the size of salt and 96 is the size of the arithmetic label.  
-const MAX_CHUNK_SIZE: usize = 2 << 28;
+const MAX_CHUNK_SIZE: usize = 1 << 29;
 
 pub trait VerifierCore {
     fn get_proving_key(&mut self) -> Result<Vec<u8>, VerifierError>;
