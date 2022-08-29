@@ -8,11 +8,12 @@ use std::env::temp_dir;
 use std::fs;
 use std::marker::PhantomData;
 use std::process::{Command, Output};
+use std::ptr::eq;
 use uuid::Uuid;
 
 use super::{
-    boolvec_to_u8vec, sha256, u8vec_to_boolvec, ARITHMETIC_LABEL_SIZE, MAX_CHUNK_SIZE,
-    PERMUTATION_COUNT, POSEIDON_WIDTH,
+    boolvec_to_u8vec, encrypt_arithmetic_labels, sha256, u8vec_to_boolvec, ARITHMETIC_LABEL_SIZE,
+    MAX_CHUNK_SIZE, PERMUTATION_COUNT, POSEIDON_WIDTH,
 };
 
 #[derive(Debug)]
@@ -26,7 +27,9 @@ pub enum ProverError {
     IncorrectEncryptedLabelSize,
     ErrorInPoseidonImplementation,
     MaxChunkSizeExceeded,
-    BinaryLabelsAuthenticationFailed,
+    BinaryLabelAuthenticationFailed,
+    BinaryLabelsNotProvided,
+    ArithmeticLabelAuthenticationFailed,
 }
 
 pub trait State {}
@@ -102,6 +105,7 @@ pub struct AuthenticateArithmeticLabels {
     // Hash of the ciphertext of arithmetic labels. We will check against
     // it during the authentication of the arithmetic labels.
     alct_hash: [u8; 32],
+    all_binary_labels: Vec<[u128; 2]>,
 }
 
 /// for uncommented fields see comments in [`LabelsumCommitment`]
@@ -115,9 +119,11 @@ pub struct ProofCreation {
     labelsum_hashes: Vec<BigUint>,
     plaintext_hashes: Vec<BigUint>,
     salts: Vec<BigUint>,
+    deltas: Vec<BigUint>,
+    zero_sums: Vec<BigUint>,
 }
 
-pub struct ProofReady {
+pub struct Finished {
     /// zk proofs which are sent to the Verifier proving that a specific Poseidon
     /// hash results from hashing the decoded output labels of the garbled
     /// circuit. Decoded output labels is the plaintext. One proof corresponds
@@ -136,7 +142,7 @@ impl State for LabelsumCommitment {}
 impl State for BinaryLabelsAuthenticated {}
 impl State for AuthenticateArithmeticLabels {}
 impl State for ProofCreation {}
-impl State for ProofReady {}
+impl State for Finished {}
 
 pub trait Hash {
     fn hash(&self, bytes: &Vec<BigUint>) -> Result<BigUint, ProverError>;
@@ -414,13 +420,18 @@ impl LabelsumProver<LabelsumCommitment> {
 }
 
 impl LabelsumProver<BinaryLabelsAuthenticated> {
-    /// A signal whether the committed GC protocol succesfully authenticated
+    /// A signal whether the `committed GC` protocol succesfully authenticated
     /// the output labels which we used earlier in the protocol.
     pub fn binary_labels_authenticated(
         self,
         success: bool,
+        all_binary_labels: Option<Vec<[u128; 2]>>,
     ) -> Result<LabelsumProver<AuthenticateArithmeticLabels>, ProverError> {
         if success {
+            if all_binary_labels.is_none() {
+                return Err(ProverError::BinaryLabelsNotProvided);
+            }
+
             Ok(LabelsumProver {
                 state: AuthenticateArithmeticLabels {
                     useful_bits: self.state.useful_bits,
@@ -432,12 +443,13 @@ impl LabelsumProver<BinaryLabelsAuthenticated> {
                     proving_key: self.state.proving_key,
                     salts: self.state.salts,
                     alct_hash: self.state.alct_hash,
+                    all_binary_labels: all_binary_labels.unwrap(),
                 },
                 poseidon: self.poseidon,
                 prover: self.prover,
             })
         } else {
-            Err(ProverError::BinaryLabelsAuthenticationFailed)
+            Err(ProverError::BinaryLabelAuthenticationFailed)
         }
     }
 }
@@ -448,7 +460,41 @@ impl LabelsumProver<AuthenticateArithmeticLabels> {
         seed: Seed,
     ) -> Result<LabelsumProver<ProofCreation>, ProverError> {
         let gen = LabelGenerator::new_from_seed(seed);
-        let label_pairs = gen.generate(self.state.plaintext.len() * 8, ARITHMETIC_LABEL_SIZE);
+        let (alabels, _seed, _generator) =
+            gen.generate(self.state.plaintext.len() * 8, ARITHMETIC_LABEL_SIZE);
+
+        // Encrypt the arithm labels with binary labels and compare the resulting
+        // ciphertext with the ciphertext which the Notary sent to us earlier.
+        let ciphertexts = encrypt_arithmetic_labels(&alabels, &self.state.all_binary_labels);
+        // flatten the ciphertexts and hash them
+        let flat: Vec<u8> = ciphertexts
+            .iter()
+            .map(|pair| {
+                let v = pair.to_vec();
+                v.into_iter().flatten().collect::<Vec<u8>>()
+            })
+            .flatten()
+            .collect();
+        if sha256(&flat) != self.state.alct_hash {
+            return Err(ProverError::ArithmeticLabelAuthenticationFailed);
+        }
+
+        // There will be as many zero_sums as there are chunks
+        let mut zero_sums: Vec<BigUint> = Vec::with_capacity(self.state.chunks.len());
+
+        // There will be as many deltas as there are plaintext bits.
+        let mut deltas: Vec<BigUint> = Vec::with_capacity(self.state.plaintext.len() * 8);
+
+        let label_pair_chunks = alabels.chunks(self.state.chunk_size);
+        // Calculate deltas for all chunks and zero_sums for each chunk
+        for chunk in label_pair_chunks {
+            let mut zero_sum = BigUint::from_u8(0).unwrap();
+            for label_pair in chunk {
+                zero_sum += label_pair[0].clone();
+                deltas.push(label_pair[1].clone() - label_pair[0].clone());
+            }
+            zero_sums.push(zero_sum);
+        }
 
         Ok(LabelsumProver {
             state: ProofCreation {
@@ -460,6 +506,8 @@ impl LabelsumProver<AuthenticateArithmeticLabels> {
                 plaintext_hashes: self.state.plaintext_hashes,
                 proving_key: self.state.proving_key,
                 salts: self.state.salts,
+                deltas,
+                zero_sums,
             },
             poseidon: self.poseidon,
             prover: self.prover,
@@ -470,12 +518,8 @@ impl LabelsumProver<AuthenticateArithmeticLabels> {
 impl LabelsumProver<ProofCreation> {
     // Creates a zk proof of label decoding for each chunk of plaintext. Returns
     // proofs in the snarkjs's "proof.json" format
-    pub fn create_zk_proof(
-        self,
-        zero_sum: Vec<BigUint>,
-        deltas: Vec<BigUint>,
-    ) -> Result<(Vec<Vec<u8>>, LabelsumProver<ProofReady>), ProverError> {
-        let inputs = self.create_proof_inputs(zero_sum, deltas);
+    pub fn create_zk_proof(self) -> Result<(Vec<Vec<u8>>, LabelsumProver<Finished>), ProverError> {
+        let inputs = self.create_proof_inputs(&self.state.zero_sums, self.state.deltas.clone());
         let mut proofs = Vec::with_capacity(inputs.len());
         for input in inputs {
             proofs.push(self.prover.prove(input, &self.state.proving_key)?);
@@ -483,7 +527,7 @@ impl LabelsumProver<ProofCreation> {
         Ok((
             proofs.clone(),
             LabelsumProver {
-                state: ProofReady {
+                state: Finished {
                     plaintext: self.state.plaintext,
                     chunks: self.state.chunks,
                     plaintext_hashes: self.state.plaintext_hashes,
@@ -496,7 +540,11 @@ impl LabelsumProver<ProofCreation> {
     }
 
     // Creates inputs in the "input.json" format
-    fn create_proof_inputs(&self, zero_sum: Vec<BigUint>, mut deltas: Vec<BigUint>) -> Vec<String> {
+    fn create_proof_inputs(
+        &self,
+        zero_sum: &Vec<BigUint>,
+        mut deltas: Vec<BigUint>,
+    ) -> Vec<String> {
         // Since the last chunk is padded with zero plaintext, we also zero-pad
         // the corresponding deltas of the last chunk.
         let delta_pad_count = self.state.chunk_size * self.state.chunks.len() - deltas.len();

@@ -1,6 +1,6 @@
 use crate::boolvec_to_u8vec;
 
-use super::{random_bigint, ARITHMETIC_LABEL_SIZE, POSEIDON_WIDTH};
+use super::{encrypt_arithmetic_labels, random_bigint, ARITHMETIC_LABEL_SIZE, POSEIDON_WIDTH};
 use crate::label::{LabelGenerator, LabelPair, Seed};
 use aes::{Aes128, NewBlockCipher};
 use cipher::{consts::U16, generic_array::GenericArray, BlockCipher, BlockEncrypt};
@@ -113,7 +113,7 @@ impl LabelsumVerifier<Setup> {
             generator.generate(plaintext_bitsize, ARITHMETIC_LABEL_SIZE);
         let label_pair_chunks = label_pairs.chunks(chunk_size);
 
-        // Calculate deltas and zero_sums for each chunk
+        // Calculate deltas for all chunks and zero_sums for each chunk
         for chunk in label_pair_chunks {
             let mut zero_sum = BigUint::from_u8(0).unwrap();
             for label_pair in chunk {
@@ -125,36 +125,7 @@ impl LabelsumVerifier<Setup> {
 
         // encrypt each arithmetic label using a corresponding binary label as a key
         // place ciphertexts in an order based on binary label's p&p bit
-        let ciphertexts: Vec<[Vec<u8>; 2]> = self
-            .state
-            .binary_labels
-            .iter()
-            .zip(label_pairs)
-            .map(|(bin_pair, arithm_pair)| {
-                let zero_key = Aes128::new_from_slice(&bin_pair[0].to_be_bytes()).unwrap();
-                let one_key = Aes128::new_from_slice(&bin_pair[1].to_be_bytes()).unwrap();
-                let mut label0 = [0u8; 16];
-                let mut label1 = [0u8; 16];
-                let ap0 = arithm_pair[0].to_bytes_be();
-                let ap1 = arithm_pair[1].to_bytes_be();
-                // pad with zeroes on the left
-                label0[16 - ap0.len()..].copy_from_slice(&ap0);
-                label1[16 - ap1.len()..].copy_from_slice(&ap1);
-                let mut label0: GenericArray<u8, U16> = GenericArray::from(label0);
-                let mut label1: GenericArray<u8, U16> = GenericArray::from(label1);
-                zero_key.encrypt_block(&mut label0);
-                one_key.encrypt_block(&mut label1);
-                // ciphertext 0 and ciphertext 1
-                let ct0 = label0.to_vec();
-                let ct1 = label1.to_vec();
-                // place ar. labels based on the point and permute bit of bin. label 0
-                if (bin_pair[0] & 1) == 0 {
-                    [ct0, ct1]
-                } else {
-                    [ct1, ct0]
-                }
-            })
-            .collect();
+        let ciphertexts = encrypt_arithmetic_labels(&label_pairs, &self.state.binary_labels);
 
         Ok(LabelsumVerifier {
             state: ReceivePlaintextHashes {

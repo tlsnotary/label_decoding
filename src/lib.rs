@@ -1,3 +1,5 @@
+use aes::{Aes128, NewBlockCipher};
+use cipher::{consts::U16, generic_array::GenericArray, BlockCipher, BlockEncrypt};
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
 use rand::{thread_rng, Rng};
 use sha2::{Digest, Sha256};
@@ -72,6 +74,44 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Encrypts each arithmetic label using a corresponding binary label as a key
+/// and returns ciphertexts in an order based on binary label's pointer bit (LSB).
+pub fn encrypt_arithmetic_labels(
+    alabels: &Vec<[BigUint; 2]>,
+    blabels: &Vec<[u128; 2]>,
+) -> Vec<[Vec<u8>; 2]> {
+    assert!(alabels.len() == blabels.len());
+
+    blabels
+        .iter()
+        .zip(alabels)
+        .map(|(bin_pair, arithm_pair)| {
+            let zero_key = Aes128::new_from_slice(&bin_pair[0].to_be_bytes()).unwrap();
+            let one_key = Aes128::new_from_slice(&bin_pair[1].to_be_bytes()).unwrap();
+            let mut label0 = [0u8; 16];
+            let mut label1 = [0u8; 16];
+            let ap0 = arithm_pair[0].to_bytes_be();
+            let ap1 = arithm_pair[1].to_bytes_be();
+            // pad with zeroes on the left
+            label0[16 - ap0.len()..].copy_from_slice(&ap0);
+            label1[16 - ap1.len()..].copy_from_slice(&ap1);
+            let mut label0: GenericArray<u8, U16> = GenericArray::from(label0);
+            let mut label1: GenericArray<u8, U16> = GenericArray::from(label1);
+            zero_key.encrypt_block(&mut label0);
+            one_key.encrypt_block(&mut label1);
+            // ciphertext 0 and ciphertext 1
+            let ct0 = label0.to_vec();
+            let ct1 = label1.to_vec();
+            // place ar. labels based on the point and permute bit of bin. label 0
+            if (bin_pair[0] & 1) == 0 {
+                [ct0, ct1]
+            } else {
+                [ct1, ct0]
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::onetimesetup::OneTimeSetup;
@@ -129,8 +169,10 @@ mod tests {
         }
         let prover_labels = choose(&all_binary_labels, &u8vec_to_boolvec(&plaintext));
 
-        let verifier =
-            LabelsumVerifier::new(all_binary_labels, Box::new(verifiernode::VerifierNode {}));
+        let verifier = LabelsumVerifier::new(
+            all_binary_labels.clone(),
+            Box::new(verifiernode::VerifierNode {}),
+        );
 
         let verifier = verifier.setup().unwrap();
 
@@ -145,10 +187,10 @@ mod tests {
         // Perform setup
         let prover = prover.setup().unwrap();
 
-        // Commitment to the plaintext is sent to the Verifier
+        // Commitment to the plaintext is sent to the Notary
         let (plaintext_hash, prover) = prover.plaintext_commitment().unwrap();
 
-        // Verifier sends back encrypted arithm. labels.
+        // Notary sends back encrypted arithm. labels.
         let (cipheretexts, verifier) = verifier.receive_plaintext_hashes(plaintext_hash);
 
         // Hash commitment to the label_sum is sent to the Notary
@@ -159,18 +201,25 @@ mod tests {
         // Notary sends the arithmetic label seed
         let (seed, verifier) = verifier.receive_labelsum_hashes(label_sum_hashes);
 
-        // At this point Notary reveals the GC seed in the committed GC protocol.
-        // Prover waits for a signal from that protocol that binary labels which
-        // the Prover used earlier were authentic.
-        let prover = prover.binary_labels_authenticated(true).unwrap();
+        // At this point the following happens in the `committed GC` protocol:
+        // - the Notary reveals the GC seed
+        // - the User checks that the GC was created from that seed
+        // - the User checks that her active output labels correspond to the
+        // output labels derived from the seed
+        // - we are called with the result of the check and (if successful)
+        // with all the output labels
+
+        let prover = prover
+            .binary_labels_authenticated(true, Some(all_binary_labels))
+            .unwrap();
 
         // Prover checks the integrity of the arithmetic labels and generates zero_sums and deltas
-        let (zero_sums, deltas, prover) = prover.authenticate_arithmetic_labels(seed).unwrap();
+        let prover = prover.authenticate_arithmetic_labels(seed).unwrap();
 
         // Prover generates the proof
-        let (proofs, prover) = prover.create_zk_proof(zero_sums, deltas).unwrap();
+        let (proofs, prover) = prover.create_zk_proof().unwrap();
 
-        // Verifier verifies the proof
+        // Notary verifies the proof
         let verifier = verifier.verify_many(proofs).unwrap();
         assert_eq!(
             type_of(&verifier),
