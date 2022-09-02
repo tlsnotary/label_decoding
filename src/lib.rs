@@ -1,11 +1,13 @@
 use aes::{Aes128, NewBlockCipher};
 use cipher::{consts::U16, generic_array::GenericArray, BlockCipher, BlockEncrypt};
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
+use poseidon::Poseidon;
 use rand::{thread_rng, Rng};
 use sha2::{Digest, Sha256};
 
 pub mod label;
 pub mod onetimesetup;
+pub mod poseidon;
 pub mod prover;
 pub mod provernode;
 pub mod verifier;
@@ -145,6 +147,10 @@ mod tests {
         let ots = OneTimeSetup::new();
         ots.setup().unwrap();
 
+        // Poseidon need to be instantiated once and then passed to all instances
+        // of Prover
+        let poseidon = Poseidon::new();
+
         // The Prover should have received the proving key (before the labelsum
         // protocol starts) like this:
         let proving_key = ots.get_proving_key().unwrap();
@@ -180,7 +186,7 @@ mod tests {
             proving_key,
             prime,
             plaintext,
-            Box::new(provernode::HasherNode {}),
+            poseidon,
             Box::new(provernode::ProverNode {}),
         );
 

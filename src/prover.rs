@@ -1,4 +1,5 @@
 use crate::label::{LabelGenerator, LabelPair, Seed};
+use crate::poseidon::Poseidon;
 use aes::{Aes128, BlockDecrypt, NewBlockCipher};
 use cipher::{consts::U16, generic_array::GenericArray};
 use json::{object, stringify_pretty};
@@ -156,7 +157,7 @@ pub struct LabelsumProver<S = Setup>
 where
     S: State,
 {
-    poseidon: Box<dyn Hash>,
+    poseidon: Poseidon,
     prover: Box<dyn Prove>,
     state: S,
 }
@@ -166,7 +167,7 @@ impl LabelsumProver {
         proving_key: Vec<u8>,
         field_prime: BigUint,
         plaintext: Vec<u8>,
-        poseidon: Box<dyn Hash>,
+        poseidon: Poseidon,
         prover: Box<dyn Prove>,
     ) -> LabelsumProver<Setup> {
         LabelsumProver {
@@ -299,7 +300,7 @@ impl LabelsumProver<PlaintextCommitment> {
                 if chunk.len() != POSEIDON_WIDTH * PERMUTATION_COUNT {
                     return Err(ProverError::WrongPoseidonInput);
                 }
-                Ok(self.poseidon.hash(chunk)?)
+                Ok(self.poseidon.hash(chunk))
             })
             .collect()
     }
@@ -345,7 +346,7 @@ impl LabelsumProver<LabelsumCommitment> {
                     .copy_from_slice(&sum);
                 let salted_sum = BigUint::from_bytes_be(&boolvec_to_u8vec(&salted_sum));
 
-                Ok(self.poseidon.hash(&vec![salted_sum.clone()])?)
+                Ok(self.poseidon.hash(&vec![salted_sum.clone()]))
             })
             .collect();
         if res.is_err() {

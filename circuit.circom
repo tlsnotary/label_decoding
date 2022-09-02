@@ -18,12 +18,15 @@ template Main() {
     signal input sum_of_zero_labels;
     signal sums[w];
 
-    component hash = Poseidon(w);
+    // acc.to the Poseidon paper, the 2nd element of the Poseidon state
+    // is the hash digest
+    component hash = PoseidonEx(w, 2);
+    hash.initialState <== 0;
     for (var i = 0; i<w; i++) {
        hash.inputs[i] <== plaintext[i];
     }
     log(1);
-    plaintext_hash === hash.out;
+    plaintext_hash === hash.out[1];
     log(2);
 
     // the last element of sum_of_deltas will contain the accumulated sum total
@@ -49,10 +52,13 @@ template Main() {
        sum_of_deltas[i+1] <== sum_of_deltas[i] + ip[i].out;
     }
     
-    component ls_hash = Poseidon(1);
+    // acc.to the Poseidon paper, the 2nd element of the Poseidon state
+    // is the hash digest
+    component ls_hash = PoseidonEx(1, 2);
+    ls_hash.initialState <== 0;
     // shift the sum to the left and put the salt into the last 128 bits
     ls_hash.inputs[0] <== (sum_of_zero_labels + sum_of_deltas[w]) * (1 << 128) + labelsum_salt;
     log(3);
-    label_sum_hash === ls_hash.out;
+    label_sum_hash === ls_hash.out[1];
 }
 component main {public [sum_of_zero_labels, plaintext_hash, label_sum_hash, delta, delta_last]} = Main();
