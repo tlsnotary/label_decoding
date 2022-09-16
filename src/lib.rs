@@ -9,6 +9,7 @@ pub mod label;
 pub mod onetimesetup;
 pub mod poseidon;
 pub mod prover;
+pub mod proverhalo2;
 pub mod provernode;
 pub mod verifier;
 pub mod verifiernode;

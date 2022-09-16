@@ -5,12 +5,6 @@ use cipher::{consts::U16, generic_array::GenericArray};
 use json::{object, stringify_pretty};
 use num::{BigUint, FromPrimitive};
 use rand::{thread_rng, Rng};
-use std::env::temp_dir;
-use std::fs;
-use std::marker::PhantomData;
-use std::process::{Command, Output};
-use std::ptr::eq;
-use uuid::Uuid;
 
 use super::{
     boolvec_to_u8vec, encrypt_arithmetic_labels, sha256, u8vec_to_boolvec, ARITHMETIC_LABEL_SIZE,
@@ -144,10 +138,6 @@ impl State for BinaryLabelsAuthenticated {}
 impl State for AuthenticateArithmeticLabels {}
 impl State for ProofCreation {}
 impl State for Finished {}
-
-pub trait Hash {
-    fn hash(&self, bytes: &Vec<BigUint>) -> Result<BigUint, ProverError>;
-}
 
 pub trait Prove {
     fn prove(&self, input: String, proving_key: &Vec<u8>) -> Result<Vec<u8>, ProverError>;

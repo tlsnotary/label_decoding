@@ -1,46 +1,11 @@
-use crate::prover::{Hash, Prove, ProverError};
+use crate::prover::{Prove, ProverError};
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
 use std::env::temp_dir;
 use std::fs;
 use std::process::{Command, Output};
 use uuid::Uuid;
 
-pub struct HasherNode {}
 pub struct ProverNode {}
-
-impl Hash for HasherNode {
-    /// Hashes inputs with the Poseidon hash. Inputs are field elements (FEs). The
-    /// amount of FEs must be POSEIDON_WIDTH * PERMUTATION_COUNT
-    fn hash(&self, inputs: &Vec<BigUint>) -> Result<BigUint, ProverError> {
-        // convert field elements into escaped strings
-        let strchunks: Vec<String> = inputs
-            .iter()
-            .map(|fe| String::from("\"") + &fe.to_string() + &String::from("\""))
-            .collect();
-        // convert to JSON array
-        let json = String::from("[") + &strchunks.join(", ") + &String::from("]");
-
-        let output = Command::new("node").args(["poseidon.mjs", &json]).output();
-        if output.is_err() {
-            return Err(ProverError::ErrorInPoseidonImplementation);
-        }
-        let output = output.unwrap();
-        // drop the trailing new line
-        println!("stderr was {:?}", String::from_utf8(output.stderr.to_vec()));
-        println!("stdout was {:?}", String::from_utf8(output.stdout.to_vec()));
-
-        let output = &output.stdout[0..output.stdout.len() - 1];
-        let str = String::from_utf8(output.to_vec());
-        if str.is_err() {
-            return Err(ProverError::ErrorInPoseidonImplementation);
-        }
-        let bi = str.unwrap().parse::<BigUint>();
-        if bi.is_err() {
-            return Err(ProverError::ErrorInPoseidonImplementation);
-        }
-        Ok(bi.unwrap())
-    }
-}
 
 impl Prove for ProverNode {
     /// Produces a groth16 proof with snarkjs. Input must be a JSON string in the
