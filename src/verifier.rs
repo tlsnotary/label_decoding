@@ -1,6 +1,6 @@
 use crate::boolvec_to_u8vec;
 
-use super::{encrypt_arithmetic_labels, random_bigint, ARITHMETIC_LABEL_SIZE, POSEIDON_WIDTH};
+use super::{encrypt_arithmetic_labels, random_bigint, ARITHMETIC_LABEL_SIZE, POSEIDON_RATE};
 use crate::label::{LabelGenerator, LabelPair, Seed};
 use aes::{Aes128, NewBlockCipher};
 use cipher::{consts::U16, generic_array::GenericArray, BlockCipher, BlockEncrypt};
@@ -97,7 +97,7 @@ impl LabelsumVerifier<Setup> {
     pub fn setup(self) -> Result<LabelsumVerifier<ReceivePlaintextHashes>, VerifierError> {
         let plaintext_bitsize = self.state.binary_labels.len();
         // Compute useful bits from the field prime
-        let chunk_size = 253 * POSEIDON_WIDTH - 128;
+        let chunk_size = 253 * POSEIDON_RATE - 128;
         // count of chunks rounded up
         let chunk_count = (plaintext_bitsize + (chunk_size - 1)) / chunk_size;
 

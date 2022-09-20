@@ -8,7 +8,7 @@ use rand::{thread_rng, Rng};
 
 use super::{
     boolvec_to_u8vec, encrypt_arithmetic_labels, sha256, u8vec_to_boolvec, ARITHMETIC_LABEL_SIZE,
-    MAX_CHUNK_SIZE, PERMUTATION_COUNT, POSEIDON_WIDTH,
+    MAX_CHUNK_SIZE, PERMUTATION_COUNT, POSEIDON_RATE,
 };
 
 #[derive(Debug)]
@@ -25,6 +25,16 @@ pub enum ProverError {
     BinaryLabelAuthenticationFailed,
     BinaryLabelsNotProvided,
     ArithmeticLabelAuthenticationFailed,
+}
+
+// input to the zk proof: both public and private inputs
+pub struct ProofInput {
+    plaintext_hash: BigUint,
+    label_sum_hash: BigUint,
+    sum_of_zero_labels: BigUint,
+    plaintext: Vec<BigUint>,
+    salt: BigUint,
+    deltas: Vec<BigUint>,
 }
 
 pub trait State {}
@@ -140,7 +150,32 @@ impl State for ProofCreation {}
 impl State for Finished {}
 
 pub trait Prove {
-    fn prove(&self, input: String, proving_key: &Vec<u8>) -> Result<Vec<u8>, ProverError>;
+    fn prove(&self, input: ProofInput) -> Result<Vec<u8>, ProverError>;
+
+    /// Returns how many bits of plaintext we will pack into one field element.
+    /// Usually, this is the bit length of the field's prime minus 1. We allow the  
+    /// implementor to set it explicitely because we use the same halo2 circuit for
+    /// the pasta curve (255 bits) and for the bn254 curve (254 bits) where the
+    /// circuit's useful_bits is set to 253.
+    fn useful_bits(&self) -> usize;
+
+    /// How many field elements the Poseidon hash consumes for one permutation.
+    fn poseidon_rate(&self) -> usize;
+
+    /// How many permutations the circuit supports. One permutation consumes
+    /// poseidon_rate() field elements.
+    fn permutation_count(&self) -> usize;
+
+    /// The size of the hash's salt in bits. The salt takes up the least
+    /// bits of the last field element.
+    fn salt_size(&self) -> usize;
+
+    /// How many bits of plaintext can fit into one chunk. This does not
+    /// include the salt of the hash - which takes up the remaining least bits
+    /// of the last field element of each chunk.
+    fn chunk_size(&self) -> usize;
+
+    fn hash(&self, inputs: &Vec<BigUint>) -> Result<BigUint, ProverError>;
 }
 
 pub struct LabelsumProver<S = Setup>
@@ -182,7 +217,7 @@ impl LabelsumProver<Setup> {
             // we can put the salt into multiple field elements.
             return Err(ProverError::WrongPrime);
         }
-        let useful_bits = self.calculate_useful_bits(&self.state.field_prime);
+        let useful_bits = self.prover.useful_bits();
         let (chunk_size, chunks, salts) =
             self.plaintext_to_chunks(useful_bits, &self.state.plaintext);
         if chunk_size > MAX_CHUNK_SIZE {
@@ -204,27 +239,33 @@ impl LabelsumProver<Setup> {
         })
     }
 
-    /// Calculates how many bits of plaintext we will pack into one field element.
-    /// Essentially, this is field_prime bit length minus 1.
-    fn calculate_useful_bits(&self, field_prime: &BigUint) -> usize {
-        (field_prime.bits() - 1) as usize
-    }
+    // /// Calculates how many bits of plaintext we will pack into one field element.
+    // /// Essentially, this is field_prime bit length minus 1.
+    // fn calculate_useful_bits(&self, field_prime: &BigUint) -> usize {
+    //     (field_prime.bits() - 1) as usize
+    // }
 
-    /// Create chunks of plaintext where each chunk consists of 16 field elements.
-    /// The last element's last 128 bits are reserved for the salt of the hash.
+    /// Creates chunks of plaintext. Each chunk will have a separate zk proof.
+    /// Each chunk's last element's least bits are reserved for the salt of the hash.
     /// If there is not enough plaintext to fill the whole chunk, we fill the gap
     /// with zero bits.
-    /// Returns (the size of a chunk (sans the salt), chunks, salts for each chunk)
+    /// Returns (the size of a chunk (sans the salt), chunks, random salts for each chunk)
     fn plaintext_to_chunks(
         &self,
         useful_bits: usize,
         plaintext: &Vec<u8>,
     ) -> (usize, Vec<Vec<BigUint>>, Vec<BigUint>) {
-        // the amount of field elements in each chunk
-        let fes_per_chunk = POSEIDON_WIDTH * PERMUTATION_COUNT;
         // the size of a chunk of plaintext not counting the salt
-        let chunk_size = useful_bits * fes_per_chunk - 128;
-        // plaintext converted into bits
+        let chunk_size = self.prover.chunk_size();
+        // the amount of field elements in each chunk
+        let fes_per_chunk =
+            (self.prover.chunk_size() + self.prover.salt_size()) / self.prover.useful_bits();
+
+        // let fes_per_chunk = self.prover.poseidon_rate() * self.prover.permutation_count();
+        // // the size of a chunk of plaintext not counting the salt
+        // let chunk_size = useful_bits * fes_per_chunk - 128;
+        // // plaintext converted into bits
+
         let mut bits = u8vec_to_boolvec(&plaintext);
         // chunk count (rounded up)
         let chunk_count = (bits.len() + (chunk_size - 1)) / chunk_size;
@@ -243,11 +284,17 @@ impl LabelsumProver<Setup> {
                 if i < fes_per_chunk - 1 {
                     chunk.push(BigUint::from_bytes_be(&boolvec_to_u8vec(&fe_bits)));
                 } else {
-                    // last field element's last 128 bits are for the salt
-                    let salt = rng.gen::<[u8; 16]>();
-                    salts.push(BigUint::from_bytes_be(&salt));
+                    // last field element's least bits are for the salt
+                    let salt: Vec<bool> = core::iter::repeat_with(|| rng.gen::<bool>())
+                        .take(self.prover.salt_size())
+                        .collect::<Vec<_>>()
+                        .try_into()
+                        .unwrap();
+
+                    //let salt = rng.gen::<[u8; 16]>();
+                    salts.push(BigUint::from_bytes_be(&boolvec_to_u8vec(&salt)));
                     let mut bits_and_salt = fe_bits.to_vec();
-                    bits_and_salt.extend(u8vec_to_boolvec(&salt).iter());
+                    bits_and_salt.extend(salt);
                     chunk.push(BigUint::from_bytes_be(&boolvec_to_u8vec(&bits_and_salt)));
                 };
             }
@@ -287,10 +334,10 @@ impl LabelsumProver<PlaintextCommitment> {
         chunks
             .iter()
             .map(|chunk| {
-                if chunk.len() != POSEIDON_WIDTH * PERMUTATION_COUNT {
+                if chunk.len() != self.prover.poseidon_rate() * PERMUTATION_COUNT {
                     return Err(ProverError::WrongPoseidonInput);
                 }
-                Ok(self.poseidon.hash(chunk))
+                Ok(self.prover.hash(chunk)?)
             })
             .collect()
     }
@@ -336,7 +383,7 @@ impl LabelsumProver<LabelsumCommitment> {
                     .copy_from_slice(&sum);
                 let salted_sum = BigUint::from_bytes_be(&boolvec_to_u8vec(&salted_sum));
 
-                Ok(self.poseidon.hash(&vec![salted_sum.clone()]))
+                Ok(self.prover.hash(&vec![salted_sum.clone()])?)
             })
             .collect();
         if res.is_err() {
@@ -507,13 +554,13 @@ impl LabelsumProver<AuthenticateArithmeticLabels> {
 }
 
 impl LabelsumProver<ProofCreation> {
-    // Creates a zk proof of label decoding for each chunk of plaintext. Returns
-    // proofs in the snarkjs's "proof.json" format
-    pub fn create_zk_proof(self) -> Result<(Vec<Vec<u8>>, LabelsumProver<Finished>), ProverError> {
+    // Creates zk proofs of label decoding for each chunk of plaintext. Returns
+    // an array of serialized proofs.
+    pub fn create_zk_proofs(self) -> Result<(Vec<Vec<u8>>, LabelsumProver<Finished>), ProverError> {
         let inputs = self.create_proof_inputs(&self.state.zero_sums, self.state.deltas.clone());
         let mut proofs = Vec::with_capacity(inputs.len());
         for input in inputs {
-            proofs.push(self.prover.prove(input, &self.state.proving_key)?);
+            proofs.push(self.prover.prove(input)?);
         }
         Ok((
             proofs.clone(),
@@ -531,7 +578,7 @@ impl LabelsumProver<ProofCreation> {
     }
 
     // Creates inputs in the "input.json" format
-    fn create_proof_inputs(
+    fn create_proof_inputs_old(
         &self,
         zero_sum: &Vec<BigUint>,
         mut deltas: Vec<BigUint>,
@@ -578,12 +625,42 @@ impl LabelsumProver<ProofCreation> {
         }
         inputs
     }
+
+    fn create_proof_inputs(
+        &self,
+        zero_sum: &Vec<BigUint>,
+        mut deltas: Vec<BigUint>,
+    ) -> Vec<ProofInput> {
+        // Since the last chunk is padded with zero plaintext, we also zero-pad
+        // the corresponding deltas of the last chunk.
+        let delta_pad_count = self.state.chunk_size * self.state.chunks.len() - deltas.len();
+        deltas.extend(vec![BigUint::from_u8(0).unwrap(); delta_pad_count]);
+
+        // we will have as many proofs as there are chunks of plaintext
+        let mut inputs: Vec<ProofInput> = Vec::with_capacity(self.state.chunks.len());
+        let chunks_of_deltas: Vec<Vec<BigUint>> = deltas
+            .chunks(self.state.chunk_size)
+            .map(|i| i.to_vec())
+            .collect();
+
+        for count in 0..self.state.chunks.len() {
+            inputs.push(ProofInput {
+                plaintext_hash: self.state.plaintext_hashes[count].clone(),
+                label_sum_hash: self.state.labelsum_hashes[count].clone(),
+                sum_of_zero_labels: zero_sum[count].clone(),
+                plaintext: self.state.chunks[count].clone(),
+                salt: self.state.salts[count].clone(),
+                deltas: chunks_of_deltas[count].clone(),
+            });
+        }
+        inputs
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provernode::ProverNode;
+    //use crate::provernode::ProverNode;
     use num::ToPrimitive;
 
     #[test]

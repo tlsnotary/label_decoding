@@ -12,6 +12,7 @@ use pasta_curves::arithmetic::FieldExt;
 use pasta_curves::pallas;
 use pasta_curves::Fp;
 
+use super::poseidon_spec::{Spec1, Spec15};
 use halo2_gadgets::poseidon::{
     primitives::{self as poseidon, ConstantLength, Spec},
     Hash, Pow5Chip, Pow5Config,
@@ -28,7 +29,8 @@ use instant::Instant;
 use num::{BigUint, FromPrimitive};
 use pasta_curves::EqAffine;
 use rand::{thread_rng, Rng};
-use web_sys::console;
+
+use super::utils::{bigint_to_bits, bigint_to_f, bits_to_limbs};
 
 // The labelsum protocol decodes a chunk of X bits at a time.
 // Each of the bit requires 1 corresponding public input - a delta.
@@ -46,63 +48,18 @@ use web_sys::console;
 
 // The total amount of field elements we can decode is 58/4 = 14 1/2,
 // which equals to 14 253-bit field elements plus 1 field element of 128 bits.
-// The last 128 bits of the 15th element will be used for the salt.
+// The remaining 125 bits of the 15th element will be used for the salt.
 
 // We could have much simpler logic if we just used 253 instance columns.
 // But compared to 64 columns, that would increase the prover time 2x.
-const FULL_FIELD_ELEMENTS: usize = 14;
-const K: u32 = 6;
-const CELLS_PER_ROW: usize = 64;
-const USEFUL_ROWS: usize = 58;
-
+pub const FULL_FIELD_ELEMENTS: usize = 14;
+pub const K: u32 = 6;
+pub const CELLS_PER_ROW: usize = 64;
+pub const USEFUL_ROWS: usize = 58;
 type F = pallas::Base;
 
-// Poseidon spec for 16-rate Poseidon
-#[derive(Debug, Clone, Copy)]
-struct Spec15;
-
-impl Spec<Fp, 16, 15> for Spec15 {
-    fn full_rounds() -> usize {
-        8
-    }
-
-    fn partial_rounds() -> usize {
-        56
-    }
-
-    fn sbox(val: Fp) -> Fp {
-        val.pow_vartime(&[5])
-    }
-
-    fn secure_mds() -> usize {
-        0
-    }
-}
-
-// Poseidon spec for 1-rate Poseidon
-#[derive(Debug, Clone, Copy)]
-struct Spec1;
-
-impl Spec<Fp, 2, 1> for Spec1 {
-    fn full_rounds() -> usize {
-        8
-    }
-
-    fn partial_rounds() -> usize {
-        56
-    }
-
-    fn sbox(val: Fp) -> Fp {
-        val.pow_vartime(&[5])
-    }
-
-    fn secure_mds() -> usize {
-        0
-    }
-}
-
 #[derive(Clone, Debug)]
-struct TopLevelConfig {
+pub struct TopLevelConfig {
     // each plaintext field element is decomposed into 256 bits
     // and each 64-bit limb is places on a row
     bits: [Column<Advice>; CELLS_PER_ROW],
@@ -144,7 +101,7 @@ struct TopLevelConfig {
     public_inputs: Column<Instance>,
 }
 
-struct MyCircuit {
+pub struct LabelsumCircuit {
     // plaintext is private input
     plaintext: [BigUint; 15],
     // deltas is a public input. We already inputted it as circuit's
@@ -155,7 +112,10 @@ struct MyCircuit {
     deltas: [Vec<Fp>; USEFUL_ROWS],
 }
 
-impl MyCircuit {
+impl LabelsumCircuit {
+    pub fn new(plaintext: [BigUint; 15], deltas: [Vec<Fp>; USEFUL_ROWS]) -> Self {
+        Self { plaintext, deltas }
+    }
     // Computes the sum of 58 `cells` and outputs the cell containing the sum
     // and the amount of rows used up during computation.
     // Computations are done in the `scratchpad` area starting at the `row_offset`
@@ -180,7 +140,7 @@ impl MyCircuit {
 
         offset += l1_chunks.len() - 1;
 
-        // we now have 14 level 2 subsums which need to be summed with each
+        // we now have 14 level-2 subsums which need to be summed with each
         // other in batches of 4. There are 2 subsums from level 1 which we
         // will combine with level 2 subsums.
 
@@ -208,7 +168,7 @@ impl MyCircuit {
 
         l3_sums.push(sum[0].clone());
 
-        // 4 level3 subsums into the final level4 sum which is the final
+        // 4 level-3 subsums into the final level-4 sum which is the final
         // sum
 
         let l3_chunks: Vec<Vec<AssignedCell<F, F>>> =
@@ -303,7 +263,7 @@ fn configure_poseidon_rate_1<S: Spec<F, 2, 1>>(
     )
 }
 
-impl Circuit<F> for MyCircuit {
+impl Circuit<F> for LabelsumCircuit {
     type Config = TopLevelConfig;
     type FloorPlanner = SimpleFloorPlanner;
 
@@ -389,7 +349,7 @@ impl Circuit<F> for MyCircuit {
         // to compose field elements from bits.
         let two = BigUint::from_u8(2).unwrap();
         let pow_2_x: Vec<_> = (0..256)
-            .map(|i| Expression::Constant(bigint_to_f(two.pow(i as u32))))
+            .map(|i| Expression::Constant(bigint_to_f(&two.pow(i as u32))))
             .collect();
 
         // GATES
@@ -531,7 +491,7 @@ impl Circuit<F> for MyCircuit {
                             || "",
                             config.expected_limbs,
                             j * 4 + row,
-                            || Value::known(bigint_to_f(limbs[row + skip].clone())),
+                            || Value::known(bigint_to_f(&limbs[row + skip].clone())),
                         )?);
                         // constrain the expected limb to match what the gate
                         // composes from bits
@@ -575,7 +535,7 @@ impl Circuit<F> for MyCircuit {
                     })
                     .collect();
 
-                println!("{:?} final scrathchpad offset", offset);
+                println!("{:?} final scratchpad offset", offset);
 
                 Ok((label_sum, plaintext?))
             },
@@ -633,238 +593,4 @@ impl Circuit<F> for MyCircuit {
 
         Ok(())
     }
-}
-
-use wasm_bindgen::prelude::*;
-
-#[wasm_bindgen]
-pub fn main() {
-    let mut rng = thread_rng();
-
-    // generate random plaintext to fill all cells. The first 3 bits of each
-    // full field element are not used, so we zero them out
-    const TOTAL_PLAINTEXT_SIZE: usize = CELLS_PER_ROW * USEFUL_ROWS;
-    let mut plaintext_bits: [bool; TOTAL_PLAINTEXT_SIZE] =
-        core::iter::repeat_with(|| rng.gen::<bool>())
-            .take(TOTAL_PLAINTEXT_SIZE)
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
-    for i in 0..FULL_FIELD_ELEMENTS {
-        plaintext_bits[256 * i + 0] = false;
-        plaintext_bits[256 * i + 1] = false;
-        plaintext_bits[256 * i + 2] = false;
-    }
-
-    // random deltas. The first 3 deltas of each set of 256 are not used, so we
-    // zero them out.
-    let mut deltas: [F; TOTAL_PLAINTEXT_SIZE] =
-        core::iter::repeat_with(|| F::from_u128(rng.gen::<u128>()))
-            .take(TOTAL_PLAINTEXT_SIZE)
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
-    for i in 0..FULL_FIELD_ELEMENTS {
-        deltas[256 * i + 0] = F::from(0);
-        deltas[256 * i + 1] = F::from(0);
-        deltas[256 * i + 2] = F::from(0);
-    }
-
-    let pt_chunks = plaintext_bits.chunks(256);
-    // plaintext has 15 BigUint field elements - this is how the User is
-    // expected to call this halo2 prover
-    let plaintext: [BigUint; FULL_FIELD_ELEMENTS + 1] = pt_chunks
-        .map(|c| {
-            // convert each chunk of bits into a field element
-            BigUint::from_bytes_be(&boolvec_to_u8vec(c))
-        })
-        .collect::<Vec<_>>()
-        .try_into()
-        .unwrap();
-
-    // number of chunks should be equal to USEFUL_ROWS
-    let all_deltas: [Vec<F>; USEFUL_ROWS] = deltas
-        .chunks(CELLS_PER_ROW)
-        .map(|c| c.to_vec())
-        .collect::<Vec<_>>()
-        .try_into()
-        .unwrap();
-
-    // transpose to make CELLS_PER_ROW instance columns
-    let input_deltas: [Vec<F>; CELLS_PER_ROW] = (0..CELLS_PER_ROW)
-        .map(|i| {
-            all_deltas
-                .iter()
-                .map(|inner| inner[i].clone())
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>()
-        .try_into()
-        .unwrap();
-
-    let mut hash_input = [F::default(); 15];
-    for i in 0..hash_input.len() {
-        hash_input[i] = bigint_to_f(plaintext[i].clone());
-    }
-    let plaintext_digest =
-        poseidon::Hash::<F, Spec15, ConstantLength<15>, 16, 15>::init().hash(hash_input);
-
-    // compute labelsum digest
-    let mut labelsum = F::from(0);
-    for it in plaintext_bits.iter().zip(deltas.clone()) {
-        let (p, d) = it;
-        let dot_product = F::from(*p) * d;
-        labelsum += dot_product;
-    }
-    let labelsum_digest =
-        poseidon::Hash::<F, Spec1, ConstantLength<1>, 2, 1>::init().hash([labelsum]);
-
-    let circuit: MyCircuit = MyCircuit {
-        plaintext,
-        deltas: all_deltas.clone(),
-    };
-
-    // let prover = MockProver::<pallas::Base>::run(k, &circuit, input_deltas.clone()).unwrap();
-
-    // assert_eq!(prover.verify(), Ok(()));
-
-    use instant::Instant;
-
-    let now = Instant::now();
-
-    let params: Params<EqAffine> = Params::new(K);
-
-    let vk = plonk::keygen_vk(&params, &circuit).unwrap();
-    let pk = plonk::keygen_pk(&params, vk.clone(), &circuit).unwrap();
-
-    //console::log_1(&format!("ProvingKey built {:?}", now.elapsed()).into());
-    println!("ProvingKey built [{:?}]", now.elapsed());
-
-    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
-
-    let mut all_inputs: Vec<&[F]> = Vec::new();
-    for i in 0..input_deltas.len() {
-        let d = input_deltas[i].as_slice();
-        all_inputs.push(d);
-    }
-
-    let tmp = &[plaintext_digest, labelsum_digest];
-    all_inputs.push(tmp);
-    println!("{:?} all inputs len", all_inputs.len());
-
-    let now = Instant::now();
-    plonk::create_proof(
-        &params,
-        &pk,
-        &[circuit],
-        &[all_inputs.as_slice()],
-        &mut rng,
-        &mut transcript,
-    )
-    .unwrap();
-    //console::log_1(&format!("Proof created {:?}", now.elapsed()).into());
-
-    println!("Proof created [{:?}]", now.elapsed());
-
-    let proof = transcript.finalize();
-
-    let now = Instant::now();
-    let strategy = SingleVerifier::new(&params);
-    let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
-
-    plonk::verify_proof(
-        &params,
-        &vk,
-        strategy,
-        &[all_inputs.as_slice()],
-        &mut transcript,
-    )
-    .unwrap();
-    //console::log_1(&format!("Proof verified {:?}", now.elapsed()).into());
-    //console::log_1(&format!("Proof created {:?}", now.elapsed()).into());
-
-    println!("Proof verified [{:?}]", now.elapsed());
-    println!("Proof size [{} kB]", proof.len() as f64 / 1024.0);
-}
-
-// Decomposes a `BigUint` into bits and returns the bits in BE bit order,
-// left padding them with zeroes to the size of 256.
-pub fn bigint_to_bits(bigint: BigUint) -> [bool; 256] {
-    let bits = u8vec_to_boolvec(&bigint.to_bytes_be());
-    let mut bits256 = vec![false; 256];
-    bits256[256 - bits.len()..].copy_from_slice(&bits);
-    bits256.try_into().unwrap()
-}
-
-pub fn bigint_to_f(bigint: BigUint) -> F {
-    let le = bigint.to_bytes_le();
-    let mut wide = [0u8; 64];
-    wide[0..le.len()].copy_from_slice(&le);
-    F::from_bytes_wide(&wide)
-}
-
-// Splits up 256 bits into 4 limbs, shifts each limb left
-// and return the shifted limb as BigUint
-fn bits_to_limbs(bits: [bool; 256]) -> [BigUint; 4] {
-    // break up the field element into 4 64-bit limbs
-    // the limb at index 0 is the high limb
-    let limbs: [BigUint; 4] = bits
-        .chunks(64)
-        .map(|c| BigUint::from_bytes_be(&boolvec_to_u8vec(c)))
-        .collect::<Vec<_>>()
-        .try_into()
-        .unwrap();
-
-    // shift each limb to the left
-    let two = BigUint::from_u8(2).unwrap();
-    let shift_by: [BigUint; 4] = [192, 128, 64, 0]
-        .iter()
-        .map(|s| two.pow(*s))
-        .collect::<Vec<_>>()
-        .try_into()
-        .unwrap();
-    limbs
-        .iter()
-        .zip(shift_by.iter())
-        .map(|(l, s)| l * s)
-        .collect::<Vec<_>>()
-        .try_into()
-        .unwrap()
-}
-
-#[inline]
-pub fn u8vec_to_boolvec(v: &[u8]) -> Vec<bool> {
-    let mut bv = Vec::with_capacity(v.len() * 8);
-    for byte in v.iter() {
-        for i in 0..8 {
-            bv.push(((byte >> (7 - i)) & 1) != 0);
-        }
-    }
-    bv
-}
-
-// Convert bits into bytes. The bits will be left-padded with zeroes to the
-// multiple of 8.
-#[inline]
-pub fn boolvec_to_u8vec(bv: &[bool]) -> Vec<u8> {
-    let rem = bv.len() % 8;
-    let first_byte_bitsize = if rem == 0 { 8 } else { rem };
-    let offset = if rem == 0 { 0 } else { 1 };
-    let mut v = vec![0u8; bv.len() / 8 + offset];
-    // implicitely left-pad the first byte with zeroes
-    for (i, b) in bv[0..first_byte_bitsize].iter().enumerate() {
-        v[i / 8] |= (*b as u8) << (first_byte_bitsize - 1 - i);
-    }
-    for (i, b) in bv[first_byte_bitsize..].iter().enumerate() {
-        v[1 + i / 8] |= (*b as u8) << (7 - (i % 8));
-    }
-    v
-}
-
-#[test]
-fn test() {
-    let two = BigUint::from_u8(2).unwrap();
-    let pow_2_64 = two.pow(64);
-    let pow_2_128 = two.pow(128);
-    let pow_2_192 = two.pow(192);
 }
