@@ -41,16 +41,16 @@ impl OneTimeSetup {
 
     pub fn setup(&self) -> Result<(), Error> {
         // check if files which we ship are present
-        if !Path::new("powersOfTau28_hez_final_14.ptau").exists()
-            || !Path::new("circuit.r1cs").exists()
+        if !Path::new("circom/powersOfTau28_hez_final_14.ptau").exists()
+            || !Path::new("circom/circuit.r1cs").exists()
         {
             return Err(Error::FileDoesNotExist);
         }
         // check if any of the files hasn't been generated. If so, regenerate
         // all files.
-        if !Path::new("circuit_0000.zkey").exists()
-            || !Path::new("circuit_final.zkey.notary").exists()
-            || !Path::new("verification_key.json").exists()
+        if !Path::new("circom/circuit_0000.zkey").exists()
+            || !Path::new("circom/circuit_final.zkey.notary").exists()
+            || !Path::new("circom/verification_key.json").exists()
         {
             let entropy = self.generate_entropy();
             //return self.regenerate1(entropy);
@@ -62,12 +62,22 @@ impl OneTimeSetup {
 
     // Returns the already existing proving key
     pub fn get_proving_key(&self) -> Result<Vec<u8>, Error> {
-        let path = Path::new("circuit_final.zkey.notary");
+        let path = Path::new("circom/circuit_final.zkey.notary");
         if !path.exists() {
             return Err(Error::FileDoesNotExist);
         }
-        let proof = fs::read(path.clone()).unwrap();
-        Ok(proof)
+        let key = fs::read(path.clone()).unwrap();
+        Ok(key)
+    }
+
+    // Returns the already existing verification key
+    pub fn get_verification_key(&self) -> Result<Vec<u8>, Error> {
+        let path = Path::new("circom/verification_key.json");
+        if !path.exists() {
+            return Err(Error::FileDoesNotExist);
+        }
+        let key = fs::read(path.clone()).unwrap();
+        Ok(key)
     }
 
     // this will work only if snarkjs is in the PATH
@@ -76,9 +86,9 @@ impl OneTimeSetup {
             .args([
                 "groth16",
                 "setup",
-                "circuit.r1cs",
-                "powersOfTau28_hez_final_14.ptau",
-                "circuit_0000.zkey",
+                "circom/circuit.r1cs",
+                "circom/powersOfTau28_hez_final_14.ptau",
+                "circom/circuit_0000.zkey",
             ])
             .output();
         self.check_output(output)?;
@@ -87,8 +97,8 @@ impl OneTimeSetup {
             .args([
                 "zkey",
                 "contribute",
-                "circuit_0000.zkey",
-                "circuit_final.zkey.notary",
+                "circom/circuit_0000.zkey",
+                "circom/circuit_final.zkey.notary",
                 &(String::from("-e=\"") + &entropy + &String::from("\"")),
             ])
             .output();
@@ -99,8 +109,8 @@ impl OneTimeSetup {
                 "zkey",
                 "export",
                 "verificationkey",
-                "circuit_final.zkey.notary",
-                "verification_key.json",
+                "circom/circuit_final.zkey.notary",
+                "circom/verification_key.json",
             ])
             .output();
         self.check_output(output)?;
@@ -111,19 +121,9 @@ impl OneTimeSetup {
     // call a js wrapper which does what regenerate1() above does
     fn regenerate2(&self, entropy: String) -> Result<(), Error> {
         let output = Command::new("node")
-            .args(["onetimesetup.mjs", &entropy])
+            .args(["circom/onetimesetup.mjs", &entropy])
             .output();
         self.check_output(output)?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn test() {
-        let mut ots = OneTimeSetup::new();
-        ots.setup().unwrap();
     }
 }

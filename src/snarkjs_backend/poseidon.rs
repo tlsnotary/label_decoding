@@ -1,20 +1,15 @@
 use std::str::FromStr;
 
 use ark_bn254::Fr as F;
-use ark_ff::{One, PrimeField};
 use ark_sponge::poseidon::{PoseidonConfig, PoseidonSponge};
+use ark_sponge::CryptographicSponge;
 use ark_sponge::FieldBasedCryptographicSponge;
-use ark_sponge::{CryptographicSponge, DuplexSpongeMode};
 use lazy_static::lazy_static;
-use num::{BigUint, FromPrimitive, Num, ToPrimitive, Zero};
+use num::{BigUint, Num};
 use regex::Regex;
 use std::fs::File;
 use std::io::prelude::*;
 
-#[derive(Debug)]
-enum Error {
-    Error1,
-}
 /// additive round keys for a specific Poseidon rate
 /// outer vec length equals to total (partial + full) round count
 /// inner vec length equals rate + capacity (our Poseidon's capacity is fixed at 1)
@@ -40,7 +35,7 @@ pub struct Poseidon {
 
 impl Poseidon {
     pub fn new() -> Poseidon {
-        let (arks, mdss) = setup().unwrap();
+        let (arks, mdss) = setup();
         Poseidon { arks, mdss }
     }
 
@@ -75,8 +70,8 @@ impl Poseidon {
     }
 }
 
-fn setup() -> Result<(Vec<Ark>, Vec<Mds>), Error> {
-    let mut file = File::open("poseidon_constants_old.circom").unwrap();
+fn setup() -> (Vec<Ark>, Vec<Mds>) {
+    let mut file = File::open("circom/poseidon_constants_old.circom").unwrap();
     let mut contents = String::new();
     file.read_to_string(&mut contents).unwrap();
 
@@ -124,13 +119,5 @@ fn setup() -> Result<(Vec<Ark>, Vec<Mds>), Error> {
     }
     // we should have consumed all elements
     assert!(v.len() == offset);
-    Ok((arks, mdss))
-}
-
-#[test]
-fn test_stuff() {
-    let p = Poseidon::new();
-    let input = vec![BigUint::from_u8(0).unwrap(); 16];
-    let out = p.hash(&input);
-    print!("{:?} out:", out);
+    (arks, mdss)
 }

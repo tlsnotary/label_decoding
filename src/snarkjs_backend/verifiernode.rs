@@ -1,3 +1,4 @@
+use crate::verifier::VerificationInput;
 use crate::verifier::{VerifierError, Verify};
 use json::{array, object, stringify, stringify_pretty, JsonValue};
 use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
@@ -7,23 +8,36 @@ use std::path::Path;
 use std::process::{Command, Output};
 use uuid::Uuid;
 
-pub struct VerifierNode {}
+pub struct Verifier {
+    verification_key: Vec<u8>,
+}
+impl Verifier {
+    pub fn new(verification_key: Vec<u8>) -> Self {
+        Self { verification_key }
+    }
+}
 
-impl Verify for VerifierNode {
-    fn verify(
-        &self,
-        proof: Vec<u8>,
-        deltas: Vec<String>,
-        plaintext_hash: BigUint,
-        labelsum_hash: BigUint,
-        zero_sum: BigUint,
-    ) -> Result<bool, VerifierError> {
+impl Verify for Verifier {
+    fn field_size(&self) -> usize {
+        254
+    }
+
+    fn useful_bits(&self) -> usize {
+        253
+    }
+
+    fn chunk_size(&self) -> usize {
+        3920 //253*15+125
+    }
+
+    fn verify(&self, input: VerificationInput) -> Result<bool, VerifierError> {
         // public.json is a flat array
         let mut public_json: Vec<String> = Vec::new();
-        public_json.push(plaintext_hash.to_string());
-        public_json.push(labelsum_hash.to_string());
-        public_json.extend::<Vec<String>>(deltas);
-        public_json.push(zero_sum.to_string());
+        public_json.push(input.plaintext_hash.to_string());
+        public_json.push(input.label_sum_hash.to_string());
+        let delta_str: Vec<String> = input.deltas.iter().map(|v| v.to_string()).collect();
+        public_json.extend::<Vec<String>>(delta_str);
+        public_json.push(input.sum_of_zero_labels.to_string());
         let s = stringify(JsonValue::from(public_json.clone()));
 
         // write into temp files and delete the files after verification
@@ -32,11 +46,11 @@ impl Verify for VerifierNode {
         path1.push(format!("public.json.{}", Uuid::new_v4()));
         path2.push(format!("proof.json.{}", Uuid::new_v4()));
         fs::write(path1.clone(), s).expect("Unable to write file");
-        fs::write(path2.clone(), proof).expect("Unable to write file");
+        fs::write(path2.clone(), input.proof).expect("Unable to write file");
 
         let output = Command::new("node")
             .args([
-                "verify.mjs",
+                "circom/verify.mjs",
                 path1.to_str().unwrap(),
                 path2.to_str().unwrap(),
             ])
@@ -54,10 +68,10 @@ impl Verify for VerifierNode {
 
 fn check_output(output: &Result<Output, std::io::Error>) -> Result<(), VerifierError> {
     if output.is_err() {
-        return Err(VerifierError::SnarkjsError);
+        return Err(VerifierError::VerifyingBackendError);
     }
     if !output.as_ref().unwrap().status.success() {
-        return Err(VerifierError::SnarkjsError);
+        return Err(VerifierError::VerifyingBackendError);
     }
     Ok(())
 }

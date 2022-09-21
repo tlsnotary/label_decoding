@@ -1,63 +1,89 @@
-use crate::verifier::{VerifierError, Verify};
-use json::{array, object, stringify, stringify_pretty, JsonValue};
-use num::{BigUint, FromPrimitive, ToPrimitive, Zero};
-use std::env::temp_dir;
-use std::fs;
-use std::path::Path;
-use std::process::{Command, Output};
-use uuid::Uuid;
+use super::utils::{bigint_to_f, deltas_to_matrices};
+use super::{Curve, CHUNK_SIZE, USEFUL_BITS};
+use crate::verifier::{VerificationInput, VerifierError, Verify};
+use halo2_proofs::plonk;
+use halo2_proofs::plonk::SingleVerifier;
+use halo2_proofs::plonk::VerifyingKey;
+use halo2_proofs::poly::commitment::Params;
+use halo2_proofs::transcript::Blake2bRead;
+use halo2_proofs::transcript::Challenge255;
+use instant::Instant;
+use pasta_curves::pallas::Base as F;
+use pasta_curves::EqAffine;
 
-pub struct Verifier {}
+/// halo2's native [halo2::VerifyingKey] can't be used without params, so we wrap
+/// them in one struct.
+#[derive(Clone)]
+pub struct VK {
+    pub key: VerifyingKey<EqAffine>,
+    pub params: Params<EqAffine>,
+}
 
-impl Verify for Verifier {
-    fn verify(
-        &self,
-        proof: Vec<u8>,
-        deltas: Vec<String>,
-        plaintext_hash: BigUint,
-        labelsum_hash: BigUint,
-        zero_sum: BigUint,
-    ) -> Result<bool, VerifierError> {
-        // public.json is a flat array
-        let mut public_json: Vec<String> = Vec::new();
-        public_json.push(plaintext_hash.to_string());
-        public_json.push(labelsum_hash.to_string());
-        public_json.extend::<Vec<String>>(deltas);
-        public_json.push(zero_sum.to_string());
-        let s = stringify(JsonValue::from(public_json.clone()));
-
-        // write into temp files and delete the files after verification
-        let mut path1 = temp_dir();
-        let mut path2 = temp_dir();
-        path1.push(format!("public.json.{}", Uuid::new_v4()));
-        path2.push(format!("proof.json.{}", Uuid::new_v4()));
-        fs::write(path1.clone(), s).expect("Unable to write file");
-        fs::write(path2.clone(), proof).expect("Unable to write file");
-
-        let output = Command::new("node")
-            .args([
-                "verify.mjs",
-                path1.to_str().unwrap(),
-                path2.to_str().unwrap(),
-            ])
-            .output();
-        fs::remove_file(path1).expect("Unable to remove file");
-        fs::remove_file(path2).expect("Unable to remove file");
-
-        check_output(&output)?;
-        if !output.unwrap().status.success() {
-            return Ok(false);
+pub struct Verifier {
+    verification_key: VK,
+    curve: Curve,
+}
+impl Verifier {
+    pub fn new(vk: VK, curve: Curve) -> Self {
+        Self {
+            verification_key: vk,
+            curve,
         }
-        Ok(true)
     }
 }
 
-fn check_output(output: &Result<Output, std::io::Error>) -> Result<(), VerifierError> {
-    if output.is_err() {
-        return Err(VerifierError::SnarkjsError);
+impl Verify for Verifier {
+    fn verify(&self, input: VerificationInput) -> Result<bool, VerifierError> {
+        let params = &self.verification_key.params;
+        let vk = &self.verification_key.key;
+
+        let strategy = SingleVerifier::new(&params);
+        let proof = input.proof;
+        let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
+
+        // convert deltas into a matrix which halo2 expects
+        let (_, deltas_as_columns) = deltas_to_matrices(&input.deltas, self.useful_bits());
+
+        let mut all_inputs: Vec<&[F]> = deltas_as_columns.iter().map(|v| v.as_slice()).collect();
+
+        // add another column with public inputs
+        let tmp = &[
+            bigint_to_f(&input.plaintext_hash),
+            bigint_to_f(&input.label_sum_hash),
+            bigint_to_f(&input.sum_of_zero_labels),
+        ];
+        all_inputs.push(tmp);
+
+        let now = Instant::now();
+        // perform the actual verification
+        let res = plonk::verify_proof(
+            params,
+            vk,
+            strategy,
+            &[all_inputs.as_slice()],
+            &mut transcript,
+        );
+        println!("Proof verified [{:?}]", now.elapsed());
+        if res.is_err() {
+            return Err(VerifierError::VerificationFailed);
+        } else {
+            Ok(true)
+        }
     }
-    if !output.as_ref().unwrap().status.success() {
-        return Err(VerifierError::SnarkjsError);
+
+    fn field_size(&self) -> usize {
+        match self.curve {
+            Curve::PASTA => 255,
+            Curve::BN254 => 254,
+            _ => panic!("a new curve was added. Add its field size here."),
+        }
     }
-    Ok(())
+
+    fn useful_bits(&self) -> usize {
+        USEFUL_BITS
+    }
+
+    fn chunk_size(&self) -> usize {
+        CHUNK_SIZE
+    }
 }

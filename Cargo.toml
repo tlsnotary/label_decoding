@@ -52,3 +52,6 @@ ark-std = { git = "https://github.com/arkworks-rs/std" }
 ark-ec = { git = "https://github.com/arkworks-rs/algebra" }
 ark-ff = { git = "https://github.com/arkworks-rs/algebra" }
 ark-serialize = { git = "https://github.com/arkworks-rs/algebra" }
+
+[dev-dependencies]
+hex = "0.4"
