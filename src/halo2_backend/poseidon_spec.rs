@@ -1,6 +1,8 @@
 use group::ff::Field;
 /// Specs which halo2 uses to compute a Poseidon hash both inside the zk
 /// circuit and in the clear.
+///
+///
 use halo2_gadgets::poseidon::primitives::Spec;
 use pasta_curves::Fp;
 

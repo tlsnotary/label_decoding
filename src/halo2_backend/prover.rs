@@ -1,18 +1,147 @@
+use super::circuit::{LabelsumCircuit, CELLS_PER_ROW, FULL_FIELD_ELEMENTS, K, USEFUL_ROWS};
 use super::poseidon_spec::{Spec1, Spec15};
+use super::utils::boolvec_to_u8vec;
 use super::utils::{bigint_to_f, f_to_bigint};
-use crate::prover::{ProofInput, Prove, ProverError};
+use crate::prover::{ProofInput, Prove, ProverError, ProvingKeyTrait};
 use halo2_gadgets::poseidon::{
     primitives::{self as poseidon, ConstantLength, Spec},
     Hash, Pow5Chip, Pow5Config,
 };
-use pasta_curves::pallas::Base as F;
-
+use halo2_proofs::arithmetic::FieldExt;
+use halo2_proofs::plonk;
+use halo2_proofs::plonk::ProvingKey;
+use halo2_proofs::plonk::SingleVerifier;
+use halo2_proofs::poly::commitment::Params;
+use halo2_proofs::transcript::Blake2bRead;
+use halo2_proofs::transcript::Blake2bWrite;
+use halo2_proofs::transcript::Challenge255;
 use num::BigUint;
+use pasta_curves::pallas::Base as F;
+use pasta_curves::EqAffine;
+use rand::{thread_rng, Rng};
+
+// halo2's native ProvingKey can't be used without params, so we wrap
+// them in one struct.
+pub struct PK {
+    key: ProvingKey<EqAffine>,
+    params: Params<EqAffine>,
+}
+impl ProvingKeyTrait for PK {}
+
 pub struct Prover {}
 
 impl Prove for Prover {
-    fn prove(&self, input: ProofInput) -> Result<Vec<u8>, ProverError> {
-        Ok(vec![0u8])
+    fn prove(&self, input: ProofInput, proving_key: PK) -> Result<Vec<u8>, ProverError> {
+        // convert each delta into a field element type
+        let deltas: Vec<F> = input.deltas.iter().map(|d| bigint_to_f(d)).collect();
+
+        // to make handling simpler, we pad each set of 253 deltas
+        // with 3 zero deltas on the left.
+        let deltas: Vec<F> = deltas
+            .chunks(self.useful_bits())
+            .map(|c| {
+                let mut v = vec![F::from(0); 3];
+                v.extend(c.to_vec());
+                v
+            })
+            .flatten()
+            .collect();
+
+        // convert plaintext into field element type
+        let plaintext: [F; 15] = input
+            .plaintext
+            .iter()
+            .map(|bigint| bigint_to_f(bigint))
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+
+        // number of chunks should be equal to USEFUL_ROWS
+        let all_deltas: [Vec<F>; USEFUL_ROWS] = deltas
+            .chunks(CELLS_PER_ROW)
+            .map(|c| c.to_vec())
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+
+        // transpose to make CELLS_PER_ROW instance columns
+        let input_deltas: [Vec<F>; CELLS_PER_ROW] = (0..CELLS_PER_ROW)
+            .map(|i| {
+                all_deltas
+                    .iter()
+                    .map(|inner| inner[i].clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+
+        let circuit = LabelsumCircuit::new(plaintext, all_deltas.clone());
+
+        use instant::Instant;
+
+        let now = Instant::now();
+
+        let params = proving_key;
+
+        let params: Params<EqAffine> = Params::new(K);
+
+        let vk = plonk::keygen_vk(&params, &circuit).unwrap();
+        let pk = plonk::keygen_pk(&params, vk.clone(), &circuit).unwrap();
+
+        println!("ProvingKey built [{:?}]", now.elapsed());
+
+        let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+
+        let mut all_inputs: Vec<&[F]> = Vec::new();
+        for i in 0..input_deltas.len() {
+            let d = input_deltas[i].as_slice();
+            all_inputs.push(d);
+        }
+
+        let tmp = &[
+            bigint_to_f(&input.plaintext_hash),
+            bigint_to_f(&input.label_sum_hash),
+        ];
+        all_inputs.push(tmp);
+        println!("{:?} all inputs len", all_inputs.len());
+
+        let now = Instant::now();
+        let mut rng = thread_rng();
+
+        plonk::create_proof(
+            &params,
+            &pk,
+            &[circuit],
+            &[all_inputs.as_slice()],
+            &mut rng,
+            &mut transcript,
+        )
+        .unwrap();
+        //console::log_1(&format!("Proof created {:?}", now.elapsed()).into());
+
+        println!("Proof created [{:?}]", now.elapsed());
+
+        let proof = transcript.finalize();
+
+        let now = Instant::now();
+        let strategy = SingleVerifier::new(&params);
+        let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
+
+        plonk::verify_proof(
+            &params,
+            &vk,
+            strategy,
+            &[all_inputs.as_slice()],
+            &mut transcript,
+        )
+        .unwrap();
+        //console::log_1(&format!("Proof verified {:?}", now.elapsed()).into());
+        //console::log_1(&format!("Proof created {:?}", now.elapsed()).into());
+
+        println!("Proof verified [{:?}]", now.elapsed());
+        println!("Proof size [{} kB]", proof.len() as f64 / 1024.0);
+        Ok(proof)
     }
 
     fn useful_bits(&self) -> usize {

@@ -103,7 +103,7 @@ pub struct TopLevelConfig {
 
 pub struct LabelsumCircuit {
     // plaintext is private input
-    plaintext: [BigUint; 15],
+    plaintext: [F; 15],
     // deltas is a public input. We already inputted it as circuit's
     // public input but halo2 won't allow us to access instance columns'
     // values to compute expected values, so we input it here again.
@@ -113,7 +113,7 @@ pub struct LabelsumCircuit {
 }
 
 impl LabelsumCircuit {
-    pub fn new(plaintext: [BigUint; 15], deltas: [Vec<Fp>; USEFUL_ROWS]) -> Self {
+    pub fn new(plaintext: [F; 15], deltas: [Vec<F>; USEFUL_ROWS]) -> Self {
         Self { plaintext, deltas }
     }
     // Computes the sum of 58 `cells` and outputs the cell containing the sum
@@ -270,7 +270,7 @@ impl Circuit<F> for LabelsumCircuit {
     fn without_witnesses(&self) -> Self {
         Self {
             plaintext: (0..FULL_FIELD_ELEMENTS + 1)
-                .map(|_| BigUint::default())
+                .map(|_| F::default())
                 .collect::<Vec<_>>()
                 .try_into()
                 .unwrap(),
