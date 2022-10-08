@@ -1,3 +1,11 @@
+//! This module implements the protocol for authenticated decoding (aka authdecode)
+//! of output labels from a garbled circuit evaluation.
+//! It assumes a privacy-free setting for the garbler, i.e. this protocol MUST ONLY
+//! start AFTER all the garbler's secret have been revealed.
+//! Specifically, in the context of the TLSNotary protocol, authdecode MUST ONLY
+//! start AFTER the Notary (who is the garbler) has revealed all of his TLS session
+//! keys' shares.
+
 use num::BigUint;
 
 pub mod halo2_backend;
@@ -64,10 +72,123 @@ type Proof = Vec<u8>;
 #[cfg(test)]
 mod tests {
 
-    use super::*;
-    use prover::LabelsumProver;
+    use crate::prover::Finished;
+    use crate::prover::ProverError;
+    use crate::prover::{LabelsumProver, Prove};
+    use crate::utils::*;
+    use crate::verifier::VerifyMany;
+    use crate::verifier::{LabelsumVerifier, VerifierError, Verify};
+    use crate::Proof;
     use rand::{thread_rng, Rng};
-    use verifier::LabelsumVerifier;
+
+    /// Accepts a concrete Prover and Verifier and runs the whole labelsum
+    /// protocol end-to-end.
+    ///
+    /// Corrupts the proof if `will_corrupt_proof` is `true` and expects the
+    /// verification to fail.
+    pub fn e2e_test(prover: Box<dyn Prove>, verifier: Box<dyn Verify>, will_corrupt_proof: bool) {
+        let (prover_result, verifier) = run_until_proofs_are_generated(prover, verifier);
+        let (proofs, prover) = prover_result.unwrap();
+
+        if !will_corrupt_proof {
+            // Notary verifies the proof
+            let verifier = verifier.verify_many(proofs).unwrap();
+            assert_eq!(
+                type_of(&verifier),
+                "labelsum::verifier::LabelsumVerifier<labelsum::verifier::VerificationSuccessfull>"
+            );
+        } else {
+            // corrupt one byte in each proof
+            let corrupted_proofs: Vec<Proof> = proofs
+                .iter()
+                .map(|p| {
+                    let old_byte = p[p.len() / 2];
+                    let new_byte = old_byte.checked_add(1).unwrap_or_default();
+                    let mut new_proof = p.clone();
+                    let p_len = new_proof.len();
+                    new_proof[p_len / 2] = new_byte;
+                    new_proof
+                })
+                .collect();
+            // Notary verifies the proof
+            let res = verifier.verify_many(corrupted_proofs);
+            assert_eq!(res.err().unwrap(), VerifierError::VerificationFailed);
+        }
+    }
+
+    /// Runs the protocol until the moment when Prover returns generated proofs.
+    ///
+    /// Returns the proofs, the prover and the verifier in their respective states.
+    pub fn run_until_proofs_are_generated(
+        prover: Box<dyn Prove>,
+        verifier: Box<dyn Verify>,
+    ) -> (
+        Result<(Vec<Proof>, LabelsumProver<Finished>), ProverError>,
+        LabelsumVerifier<VerifyMany>,
+    ) {
+        let mut rng = thread_rng();
+
+        // generate random plaintext of random size up to 1000 bytes
+        let plaintext: Vec<u8> = core::iter::repeat_with(|| rng.gen::<u8>())
+            .take(thread_rng().gen_range(0..1000))
+            .collect();
+
+        // Normally, the Prover is expected to obtain her binary labels by
+        // evaluating the garbled circuit.
+        // To keep this test simple, we don't evaluate the gc, but we generate
+        // all labels of the Verifier and give the Prover her active labels.
+        let bit_size = plaintext.len() * 8;
+        let mut all_binary_labels: Vec<[u128; 2]> = Vec::with_capacity(bit_size);
+        let mut delta: u128 = rng.gen();
+        // set the last bit
+        delta |= 1;
+        for _ in 0..bit_size {
+            let label_zero: u128 = rng.gen();
+            all_binary_labels.push([label_zero, label_zero ^ delta]);
+        }
+        let prover_labels = choose(&all_binary_labels, &u8vec_to_boolvec(&plaintext));
+
+        let verifier = LabelsumVerifier::new(all_binary_labels.clone(), verifier);
+
+        let verifier = verifier.setup().unwrap();
+
+        let prover = LabelsumProver::new(plaintext, prover);
+
+        // Perform setup
+        let prover = prover.setup().unwrap();
+
+        // Commitment to the plaintext is sent to the Notary
+        let (plaintext_hash, prover) = prover.plaintext_commitment().unwrap();
+
+        // Notary sends back encrypted arithm. labels.
+        let (ciphertexts, verifier) = verifier.receive_plaintext_hashes(plaintext_hash).unwrap();
+
+        // Hash commitment to the label_sum is sent to the Notary
+        let (label_sum_hashes, prover) = prover
+            .labelsum_commitment(ciphertexts, &prover_labels)
+            .unwrap();
+
+        // Notary sends the arithmetic label seed
+        let (seed, verifier) = verifier.receive_labelsum_hashes(label_sum_hashes).unwrap();
+
+        // At this point the following happens in the `committed GC` protocol:
+        // - the Notary reveals the GC seed
+        // - the User checks that the GC was created from that seed
+        // - the User checks that her active output labels correspond to the
+        // output labels derived from the seed
+        // - we are called with the result of the check and (if successful)
+        // with all the output labels
+
+        let prover = prover
+            .binary_labels_authenticated(true, Some(all_binary_labels))
+            .unwrap();
+
+        // Prover checks the integrity of the arithmetic labels and generates zero_sums and deltas
+        let prover = prover.authenticate_arithmetic_labels(seed).unwrap();
+
+        // Prover generates the proof
+        (prover.create_zk_proofs(), verifier)
+    }
 
     /// Unzips a slice of pairs, returning items corresponding to choice
     fn choose<T: Clone>(items: &[[T; 2]], choice: &[bool]) -> Vec<T> {
@@ -79,89 +200,8 @@ mod tests {
             .collect()
     }
 
+    /// Returns the name of the type
     fn type_of<T>(_: &T) -> &'static str {
         std::any::type_name::<T>()
-    }
-
-    pub mod fixtures {
-        use super::utils::*;
-        use super::*;
-        use crate::prover::Prove;
-        use crate::verifier::Verify;
-
-        /// Accepts a concrete Prover and Verifier and runs the whole labelsum
-        /// protocol end-to-end.
-        pub fn e2e_test(prover: Box<dyn Prove>, verifier: Box<dyn Verify>) {
-            let mut rng = thread_rng();
-
-            // generate random plaintext of random size up to 2000 bytes
-            let plaintext: Vec<u8> = core::iter::repeat_with(|| rng.gen::<u8>())
-                .take(thread_rng().gen_range(0..1000))
-                .collect();
-
-            // Normally, the Prover is expected to obtain her binary labels by
-            // evaluating the garbled circuit.
-            // To keep this test simple, we don't evaluate the gc, but we generate
-            // all labels of the Verifier and give the Prover her active labels.
-            let bit_size = plaintext.len() * 8;
-            let mut all_binary_labels: Vec<[u128; 2]> = Vec::with_capacity(bit_size);
-            let mut delta: u128 = rng.gen();
-            // set the last bit
-            delta |= 1;
-            for _ in 0..bit_size {
-                let label_zero: u128 = rng.gen();
-                all_binary_labels.push([label_zero, label_zero ^ delta]);
-            }
-            let prover_labels = choose(&all_binary_labels, &u8vec_to_boolvec(&plaintext));
-
-            let verifier = LabelsumVerifier::new(all_binary_labels.clone(), verifier);
-
-            let verifier = verifier.setup().unwrap();
-
-            let prover = LabelsumProver::new(plaintext, prover);
-
-            // Perform setup
-            let prover = prover.setup().unwrap();
-
-            // Commitment to the plaintext is sent to the Notary
-            let (plaintext_hash, prover) = prover.plaintext_commitment().unwrap();
-
-            // Notary sends back encrypted arithm. labels.
-            let (ciphertexts, verifier) =
-                verifier.receive_plaintext_hashes(plaintext_hash).unwrap();
-
-            // Hash commitment to the label_sum is sent to the Notary
-            let (label_sum_hashes, prover) = prover
-                .labelsum_commitment(ciphertexts, &prover_labels)
-                .unwrap();
-
-            // Notary sends the arithmetic label seed
-            let (seed, verifier) = verifier.receive_labelsum_hashes(label_sum_hashes).unwrap();
-
-            // At this point the following happens in the `committed GC` protocol:
-            // - the Notary reveals the GC seed
-            // - the User checks that the GC was created from that seed
-            // - the User checks that her active output labels correspond to the
-            // output labels derived from the seed
-            // - we are called with the result of the check and (if successful)
-            // with all the output labels
-
-            let prover = prover
-                .binary_labels_authenticated(true, Some(all_binary_labels))
-                .unwrap();
-
-            // Prover checks the integrity of the arithmetic labels and generates zero_sums and deltas
-            let prover = prover.authenticate_arithmetic_labels(seed).unwrap();
-
-            // Prover generates the proof
-            let (proofs, prover) = prover.create_zk_proofs().unwrap();
-
-            // Notary verifies the proof
-            let verifier = verifier.verify_many(proofs).unwrap();
-            assert_eq!(
-                type_of(&verifier),
-                "labelsum::verifier::LabelsumVerifier<labelsum::verifier::VerificationSuccessfull>"
-            );
-        }
     }
 }

@@ -11,7 +11,7 @@ pub struct OneTimeSetup {
 }
 
 /// OneTimeSetup generates the proving key and the verification key. It can be
-/// ahead of time before the actual zk proving/verification takes place.
+/// run ahead of time before the actual zk proving/verification takes place.
 ///
 /// Note that as of Oct 2022 halo2 does not support serializing the proving/verification
 /// keys. That's why we can't use cached keys but need to call this one-time setup every
@@ -33,7 +33,7 @@ impl OneTimeSetup {
             [[Default::default(); CELLS_PER_ROW]; USEFUL_ROWS],
         );
 
-        // safe to unwrap, we are inputting the same params and circuit on every
+        // safe to unwrap, we are inputting deterministic params and circuit on every
         // invocation
         let vk = plonk::keygen_vk(&params, &circuit).unwrap();
         let pk = plonk::keygen_pk(&params, vk.clone(), &circuit).unwrap();

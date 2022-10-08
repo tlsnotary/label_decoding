@@ -18,7 +18,7 @@ lto = true
 num = { version = "0.4"}
 rand = "0.8.5"
 json = "0.12.4"
-aes = { version = "0.7.5", features = [] }
+aes = { version = "0.7.5"}
 cipher = "0.3"
 uuid = { version = "0.8.1", features = ["serde", "v4"] }
 rand_chacha = "0.3"
@@ -27,12 +27,11 @@ lazy_static = "1.4.0"
 regex = "1.6.0"
 ark-bn254 = { git = "https://github.com/arkworks-rs/curves" }
 ark-ff = { git = "https://github.com/arkworks-rs/algebra" }
-# using arbitrary Poseidon rate is not possible in crates.io
-# version "0.3.0" of ark-sponge 
+# using arbitrary Poseidon rate is not possible in crates.io's version "0.3.0" of ark-sponge.
+# temporarily pulling from github
 ark-sponge = { git = "https://github.com/arkworks-rs/sponge", default-features = false }
 
-#dependencies for halo2 prover
-
+#dependencies for halo2
 halo2_proofs = { git = "https://github.com/zcash/halo2"}
 halo2_gadgets = { git = "https://github.com/zcash/halo2"}
 ff = "0.12"
@@ -55,3 +54,4 @@ ark-serialize = { git = "https://github.com/arkworks-rs/algebra" }
 
 [dev-dependencies]
 hex = "0.4"
+num-bigint = { version = "0.4.3", features = ["rand"] }

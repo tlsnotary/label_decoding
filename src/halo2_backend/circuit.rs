@@ -49,7 +49,25 @@ pub const FULL_FIELD_ELEMENTS: usize = 14;
 
 /// The parameter informing halo2 about the upper bound of how many rows our
 /// circuit uses. This is a power of 2.
-pub const K: u32 = 6;
+///
+/// TODO: Initially K was set to 6 and the whole circuit was built around
+/// 58 rows. After the circuit was built, I discovered that setting
+/// rate-15 Poseidon full rounds count to 64 produces a `NotEnoughRowsAvailable`
+/// error.
+///
+/// One solution to decrease the number of used rows is to set Poseidon rate-15 partial
+/// rounds count to 62 (which is acceptable acc.to
+/// https://github.com/filecoin-project/neptune/blob/master/spec/poseidon_spec.pdf
+/// see p.5 Security Inequalities (3) which says that total round count must be at least
+/// > 58), but that is not in keeping with the arbitrary security margin suggested in the
+/// Poseidon paper which bring the total round count to 64.
+///
+/// The other solution is to modify the circuit to hash 14 elements instead of 15. This
+/// will decrease the required partial rounds to 60. But that means modifying the circuit.
+///
+/// The simplest solution was to increase the amount of available rows from 6 to 7. However,
+/// this increases the prover's time by 30%.
+pub const K: u32 = 7;
 
 /// For one row of the circuit, this is the amount of advice cells to put
 /// plaintext bits into and also this is the amount of instance cells to
@@ -156,7 +174,9 @@ impl Circuit<F> for LabelsumCircuit {
     fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
         // keep this in case we modify the circuit and change K but forget
         // to update USEFUL_ROWS
-        assert!(((1 << K) as usize) - (meta.blinding_factors() + 1) == USEFUL_ROWS);
+        // UPDATE: since we temporary changed [K] from 6 to 7, commenting out
+        // this assert. Uncomment when
+        // assert!(((1 << K) as usize) - (meta.blinding_factors() + 1) == USEFUL_ROWS);
 
         // ADVICE COLUMNS
 
@@ -408,6 +428,7 @@ impl Circuit<F> for LabelsumCircuit {
                             dot_product += self.deltas[j * 4 + row][i]
                                 * F::from(bits[CELLS_PER_ROW * (row + skip) + i]);
                         }
+
                         // place it into a cell for the expected dot_product
                         assigned_dot_products.push(region.assign_advice(
                             || "",
@@ -678,3 +699,7 @@ impl LabelsumCircuit {
         Ok(assigned_sum)
     }
 }
+
+/// The circuit is tested from [super::prover::tests]
+#[cfg(test)]
+mod tests {}

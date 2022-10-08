@@ -21,7 +21,9 @@ impl Spec<Fp, 16, 15> for Spec15 {
     }
 
     fn partial_rounds() -> usize {
-        56
+        // Taken from https://github.com/iden3/circomlib/blob/master/circuits/poseidon.circom
+        // (see "var N_ROUNDS_P[16]"), where they use 64 partial rounds for 15-rate Poseidon
+        64
     }
 
     fn sbox(val: Fp) -> Fp {
@@ -49,6 +51,8 @@ impl Spec<Fp, 2, 1> for Spec1 {
     }
 
     fn partial_rounds() -> usize {
+        // Taken from https://github.com/iden3/circomlib/blob/master/circuits/poseidon.circom
+        // (see "var N_ROUNDS_P[16]"), where they use 56 partial rounds for 1-rate Poseidon
         56
     }
 
@@ -56,6 +60,8 @@ impl Spec<Fp, 2, 1> for Spec1 {
         val.pow_vartime(&[5])
     }
 
+    /// TODO: waiting on a definitive answer if returning 0 here is safe
+    /// https://github.com/zcash/halo2/issues/674
     fn secure_mds() -> usize {
         0
     }

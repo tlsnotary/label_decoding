@@ -19,6 +19,7 @@ pub struct VK {
     pub params: Params<EqAffine>,
 }
 
+/// Implements the Verifier in the authdecode protocol.
 pub struct Verifier {
     verification_key: VK,
     curve: Curve,

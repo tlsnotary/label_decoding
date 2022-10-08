@@ -8,7 +8,7 @@ mod tests {
     use super::onetimesetup::OneTimeSetup;
     use super::provernode::Prover;
     use super::verifiernode::Verifier;
-    use crate::tests::fixtures::e2e_test;
+    use crate::tests::e2e_test;
 
     #[test]
     fn snarkjs_e2e_test() {
@@ -27,6 +27,6 @@ mod tests {
 
         let prover = Box::new(Prover::new(proving_key));
         let verifier = Box::new(Verifier::new(verification_key));
-        e2e_test(prover, verifier);
+        e2e_test(prover, verifier, false);
     }
 }

@@ -28,26 +28,38 @@ mod tests {
     use super::prover::Prover;
     use super::verifier::Verifier;
     use super::*;
-    use crate::tests::fixtures::e2e_test;
+    use crate::tests::e2e_test;
 
-    #[test]
-    /// Tests the whole authdecode protocol end-to-end
-    fn halo2_e2e_test() {
+    /// Run the whole authdecode protocol end-to-end, optionally corrupting the proof
+    /// if `will_corrupt_proof` is set to true.
+    fn halo2_e2e_test(will_corrupt_proof: bool) {
         let mut prover_ots = OneTimeSetup::new();
         let mut verifier_ots = OneTimeSetup::new();
 
-        // The Prover should have generated the proving key (before the labelsum
+        // The Prover should have generated the proving key (before the authdecode
         // protocol starts) like this:
         prover_ots.setup();
         let proving_key = prover_ots.get_proving_key();
 
-        // The Verifier should have generated the verifying key (before the labelsum
+        // The Verifier should have generated the verifying key (before the authdecode
         // protocol starts) like this:
         verifier_ots.setup();
         let verification_key = verifier_ots.get_verification_key();
 
         let prover = Box::new(Prover::new(proving_key));
         let verifier = Box::new(Verifier::new(verification_key, Curve::PASTA));
-        e2e_test(prover, verifier);
+        e2e_test(prover, verifier, will_corrupt_proof);
+    }
+
+    #[test]
+    /// Tests that the protocol runs successfully
+    fn halo2_e2e_test_success() {
+        halo2_e2e_test(false);
+    }
+
+    #[test]
+    /// Tests that a corrupted proof causes verification to fail
+    fn halo2_e2e_test_failure() {
+        halo2_e2e_test(true);
     }
 }
