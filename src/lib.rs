@@ -1,24 +1,24 @@
-//! This module implements the protocol for authenticated decoding (aka authdecode)
+//! This module implements the protocol for authenticated decoding (aka AuthDecode)
 //! of output labels from a garbled circuit evaluation.
 //! It assumes a privacy-free setting for the garbler, i.e. this protocol MUST ONLY
 //! start AFTER all the garbler's secret have been revealed.
-//! Specifically, in the context of the TLSNotary protocol, authdecode MUST ONLY
+//! Specifically, in the context of the TLSNotary protocol, AuthDecode MUST ONLY
 //! start AFTER the Notary (who is the garbler) has revealed all of his TLS session
 //! keys' shares.
 
 use num::BigUint;
 
 pub mod halo2_backend;
-pub mod label;
-pub mod prover;
+mod label;
+mod prover;
 pub mod snarkjs_backend;
-pub mod utils;
-pub mod verifier;
+mod utils;
+mod verifier;
 
 /// The bitsize of an arithmetic label. MUST be > 40 to give statistical
 /// security against the Prover guessing the label. For a 254-bit field,
 /// the bitsize > 96 would require 2 field elements for the
-/// salted labelsum instead of 1.
+/// salted label sum instead of 1.
 const ARITHMETIC_LABEL_SIZE: usize = 96;
 
 /// The maximum supported size (in bits) of one [Chunk] of plaintext.
@@ -27,7 +27,7 @@ const ARITHMETIC_LABEL_SIZE: usize = 96;
 /// 2^20 should suffice for most use cases.
 const MAX_CHUNK_SIZE: usize = 1 << 20;
 
-/// The maximum supported amount of plaintext [Chunk]s ( which equals to the
+/// The maximum supported amount of plaintext [Chunk]s ( which is equal to the
 /// amount of zk proofs). Having too many zk proofs may be a DOS vector
 /// against the Notary who is the verifier of zk proofs.
 const MAX_CHUNK_COUNT: usize = 128;
@@ -55,7 +55,7 @@ type PlaintextHash = BigUint;
 
 /// A Poseidon hash digest of a [Salt]ed arithmetic sum of arithmetic labels
 /// corresponding to the [Chunk]. This is an EC field element.
-type LabelsumHash = BigUint;
+type LabelSumHash = BigUint;
 
 /// An arithmetic sum of all "zero" arithmetic labels ( those are the labels
 /// which encode the bit value 0) corresponding to one [Chunk].
@@ -66,37 +66,33 @@ type ZeroSum = BigUint;
 type Delta = BigUint;
 
 /// A serialized proof proving that a Poseidon hash is the result of hashing a
-/// salted [Chunk].
+/// salted [Chunk], which [Chunk] is the result of the decoding of a garbled
+/// circuit's labels.
 type Proof = Vec<u8>;
 
 #[cfg(test)]
 mod tests {
-
-    use crate::prover::Finished;
     use crate::prover::ProverError;
-    use crate::prover::{LabelsumProver, Prove};
+    use crate::prover::{AuthDecodeProver, Prove};
     use crate::utils::*;
     use crate::verifier::VerifyMany;
-    use crate::verifier::{LabelsumVerifier, VerifierError, Verify};
-    use crate::Proof;
+    use crate::verifier::{AuthDecodeVerifier, VerifierError, Verify};
+    use crate::{Proof, Salt};
     use rand::{thread_rng, Rng};
 
-    /// Accepts a concrete Prover and Verifier and runs the whole labelsum
+    /// Accepts a concrete Prover and Verifier and runs the whole AuthDecode
     /// protocol end-to-end.
     ///
     /// Corrupts the proof if `will_corrupt_proof` is `true` and expects the
     /// verification to fail.
     pub fn e2e_test(prover: Box<dyn Prove>, verifier: Box<dyn Verify>, will_corrupt_proof: bool) {
         let (prover_result, verifier) = run_until_proofs_are_generated(prover, verifier);
-        let (proofs, prover) = prover_result.unwrap();
+        let (proofs, _salts) = prover_result.unwrap();
 
         if !will_corrupt_proof {
-            // Notary verifies the proof
-            let verifier = verifier.verify_many(proofs).unwrap();
-            assert_eq!(
-                type_of(&verifier),
-                "labelsum::verifier::LabelsumVerifier<labelsum::verifier::VerificationSuccessfull>"
-            );
+            // Notary verifies a good proof
+            let (result, _) = verifier.verify_many(proofs).unwrap();
+            assert_eq!(result, true);
         } else {
             // corrupt one byte in each proof
             let corrupted_proofs: Vec<Proof> = proofs
@@ -110,7 +106,7 @@ mod tests {
                     new_proof
                 })
                 .collect();
-            // Notary verifies the proof
+            // Notary tries to verify a corrupted proof
             let res = verifier.verify_many(corrupted_proofs);
             assert_eq!(res.err().unwrap(), VerifierError::VerificationFailed);
         }
@@ -118,13 +114,13 @@ mod tests {
 
     /// Runs the protocol until the moment when Prover returns generated proofs.
     ///
-    /// Returns the proofs, the prover and the verifier in their respective states.
+    /// Returns the proofs, the salts, and the verifier in the next expected state.
     pub fn run_until_proofs_are_generated(
         prover: Box<dyn Prove>,
         verifier: Box<dyn Verify>,
     ) -> (
-        Result<(Vec<Proof>, LabelsumProver<Finished>), ProverError>,
-        LabelsumVerifier<VerifyMany>,
+        Result<(Vec<Proof>, Vec<Salt>), ProverError>,
+        AuthDecodeVerifier<VerifyMany>,
     ) {
         let mut rng = thread_rng();
 
@@ -148,11 +144,11 @@ mod tests {
         }
         let prover_labels = choose(&all_binary_labels, &u8vec_to_boolvec(&plaintext));
 
-        let verifier = LabelsumVerifier::new(all_binary_labels.clone(), verifier);
+        let verifier = AuthDecodeVerifier::new(all_binary_labels.clone(), verifier);
 
         let verifier = verifier.setup().unwrap();
 
-        let prover = LabelsumProver::new(plaintext, prover);
+        let prover = AuthDecodeProver::new(plaintext, prover);
 
         // Perform setup
         let prover = prover.setup().unwrap();
@@ -165,11 +161,11 @@ mod tests {
 
         // Hash commitment to the label_sum is sent to the Notary
         let (label_sum_hashes, prover) = prover
-            .labelsum_commitment(ciphertexts, &prover_labels)
+            .label_sum_commitment(ciphertexts, &prover_labels)
             .unwrap();
 
         // Notary sends the arithmetic label seed
-        let (seed, verifier) = verifier.receive_labelsum_hashes(label_sum_hashes).unwrap();
+        let (seed, verifier) = verifier.receive_label_sum_hashes(label_sum_hashes).unwrap();
 
         // At this point the following happens in the `committed GC` protocol:
         // - the Notary reveals the GC seed
@@ -198,10 +194,5 @@ mod tests {
             .zip(choice)
             .map(|(items, choice)| items[*choice as usize].clone())
             .collect()
-    }
-
-    /// Returns the name of the type
-    fn type_of<T>(_: &T) -> &'static str {
-        std::any::type_name::<T>()
     }
 }

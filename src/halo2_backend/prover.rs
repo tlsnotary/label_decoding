@@ -1,4 +1,4 @@
-use super::circuit::{LabelsumCircuit, SALT_SIZE, TOTAL_FIELD_ELEMENTS};
+use super::circuit::{AuthDecodeCircuit, SALT_SIZE, TOTAL_FIELD_ELEMENTS};
 use super::poseidon::{poseidon_1, poseidon_15};
 use super::utils::{bigint_to_f, deltas_to_matrices, f_to_bigint};
 use super::{CHUNK_SIZE, USEFUL_BITS};
@@ -21,7 +21,8 @@ pub struct PK {
     pub params: Params<EqAffine>,
 }
 
-/// Implements the Prover in the authdecode protocol.
+/// Implements the Prover in the authdecode protocol using halo2
+/// proof system.
 pub struct Prover {
     proving_key: PK,
 }
@@ -31,7 +32,7 @@ impl Prove for Prover {
         if input.deltas.len() != self.chunk_size() || input.plaintext.len() != TOTAL_FIELD_ELEMENTS
         {
             // this can only be caused by an error in
-            // `crate::prover::LabelsumProver` logic
+            // `crate::prover::AuthDecodeProver` logic
             return Err(ProverError::InternalError);
         }
 
@@ -64,7 +65,7 @@ impl Prove for Prover {
         // prepare the proving system and generate the proof:
 
         let circuit =
-            LabelsumCircuit::new(plaintext, bigint_to_f(&input.salt), deltas_as_rows.into());
+            AuthDecodeCircuit::new(plaintext, bigint_to_f(&input.salt), deltas_as_rows.into());
 
         let params = &self.proving_key.params;
         let pk = &self.proving_key.key;
@@ -73,15 +74,17 @@ impl Prove for Prover {
 
         let mut rng = thread_rng();
 
-        plonk::create_proof(
+        let res = plonk::create_proof(
             params,
             pk,
             &[circuit],
             &[all_inputs.as_slice()],
             &mut rng,
             &mut transcript,
-        )
-        .unwrap();
+        );
+        if res.is_err() {
+            return Err(ProverError::ProvingBackendError);
+        }
 
         println!("Proof created [{:?}]", now.elapsed());
         let proof = transcript.finalize();
@@ -197,7 +200,7 @@ mod tests {
             ];
             good_inputs.push(tmp);
 
-            let circuit = LabelsumCircuit::new(
+            let circuit = AuthDecodeCircuit::new(
                 good_plaintext,
                 bigint_to_f(&input.salt),
                 deltas_as_rows.into(),
@@ -207,7 +210,7 @@ mod tests {
 
             println!("start mockprover");
             let prover = MockProver::run(K, &circuit, good_inputs.clone()).unwrap();
-            prover.assert_satisfied();
+            assert!(prover.verify().is_ok());
             println!("end mockprover");
 
             // Corrupt at least one delta which corresponds to plaintext bit 1.
@@ -221,12 +224,8 @@ mod tests {
             }
 
             println!("start mockprover2");
-            let result = catch_unwind(|| {
-                MockProver::run(K, &circuit, bad_input1.clone())
-                    .unwrap()
-                    .assert_satisfied();
-            });
-            assert!(result.is_err());
+            let prover = MockProver::run(K, &circuit, bad_input1.clone()).unwrap();
+            assert!(prover.verify().is_err());
             println!("end mockprover2");
 
             // One-by-one corrupt the plaintext hash, the label sum hash, the zero sum.
@@ -236,12 +235,8 @@ mod tests {
                 let mut bad_public_input = good_inputs.clone();
                 bad_public_input[CELLS_PER_ROW][i] = F::from(123);
                 println!("start mockprover3");
-                let result = catch_unwind(|| {
-                    MockProver::run(K, &circuit, bad_public_input.clone())
-                        .unwrap()
-                        .assert_satisfied();
-                });
-                assert!(result.is_err());
+                let prover = MockProver::run(K, &circuit, bad_public_input.clone()).unwrap();
+                assert!(prover.verify().is_err());
                 println!("end mockprover3");
             }
 
@@ -250,36 +245,28 @@ mod tests {
 
             let mut bad_plaintext = good_plaintext.clone();
             bad_plaintext[0] = F::from(123);
-            let circuit = LabelsumCircuit::new(
+            let circuit = AuthDecodeCircuit::new(
                 bad_plaintext,
                 bigint_to_f(&input.salt),
                 deltas_as_rows.into(),
             );
             println!("start mockprover4");
-            let result = catch_unwind(|| {
-                MockProver::run(K, &circuit, good_inputs.clone())
-                    .unwrap()
-                    .assert_satisfied();
-            });
-            assert!(result.is_err());
+            let prover = MockProver::run(K, &circuit, good_inputs.clone()).unwrap();
+            assert!(prover.verify().is_err());
             println!("end mockprover4");
 
             // Corrupt only the salt.
             // Expect halo2 to panic.
 
             let bad_salt = BigUint::from(123u8);
-            let circuit = LabelsumCircuit::new(
+            let circuit = AuthDecodeCircuit::new(
                 good_plaintext,
                 bigint_to_f(&bad_salt),
                 deltas_as_rows.into(),
             );
             println!("start mockprover5");
-            let result = catch_unwind(|| {
-                MockProver::run(K, &circuit, good_inputs.clone())
-                    .unwrap()
-                    .assert_satisfied();
-            });
-            assert!(result.is_err());
+            let prover = MockProver::run(K, &circuit, good_inputs.clone()).unwrap();
+            assert!(prover.verify().is_err());
             println!("end mockprover5");
 
             Ok(Default::default())

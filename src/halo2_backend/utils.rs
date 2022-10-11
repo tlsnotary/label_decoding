@@ -11,9 +11,9 @@ use pasta_curves::Fp as F;
 /// than 256 bits
 pub fn bigint_to_256bits(bigint: BigUint) -> [bool; 256] {
     let bits = u8vec_to_boolvec(&bigint.to_bytes_be());
-    let mut bits256 = vec![false; 256];
+    let mut bits256 = [false; 256];
     bits256[256 - bits.len()..].copy_from_slice(&bits);
-    bits256.try_into().unwrap()
+    bits256
 }
 #[test]
 fn test_bigint_to_256bits() {
@@ -105,7 +105,7 @@ pub fn bits_to_limbs(bits: [bool; 256]) -> [BigUint; 4] {
 
     // shift each limb to the left:
 
-    let two = BigUint::from_u8(2).unwrap();
+    let two = BigUint::from(2u8);
     // how many bits to left-shift each limb by
     let shift_by: [BigUint; 4] = [192, 128, 64, 0]
         .iter()
@@ -233,7 +233,7 @@ fn deltas_to_matrix_of_rows(deltas: &Vec<F>) -> ([[F; CELLS_PER_ROW]; USEFUL_ROW
         .unwrap()
 }
 
-/// Transposes a matrix of rows.
+/// Transposes a matrix of rows of fixed size.
 fn transpose_rows(matrix: &[[F; CELLS_PER_ROW]; USEFUL_ROWS]) -> [[F; USEFUL_ROWS]; CELLS_PER_ROW] {
     (0..CELLS_PER_ROW)
         .map(|i| {

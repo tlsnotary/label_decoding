@@ -1,8 +1,8 @@
-pub mod circuit;
+mod circuit;
 pub mod onetimesetup;
-pub mod poseidon;
+mod poseidon;
 pub mod prover;
-pub mod utils;
+mod utils;
 pub mod verifier;
 
 /// The amount of useful bits, see [crate::prover::Prove::useful_bits].
@@ -33,18 +33,13 @@ mod tests {
     /// Run the whole authdecode protocol end-to-end, optionally corrupting the proof
     /// if `will_corrupt_proof` is set to true.
     fn halo2_e2e_test(will_corrupt_proof: bool) {
-        let mut prover_ots = OneTimeSetup::new();
-        let mut verifier_ots = OneTimeSetup::new();
-
         // The Prover should have generated the proving key (before the authdecode
         // protocol starts) like this:
-        prover_ots.setup();
-        let proving_key = prover_ots.get_proving_key();
+        let proving_key = OneTimeSetup::proving_key();
 
         // The Verifier should have generated the verifying key (before the authdecode
         // protocol starts) like this:
-        verifier_ots.setup();
-        let verification_key = verifier_ots.get_verification_key();
+        let verification_key = OneTimeSetup::verification_key();
 
         let prover = Box::new(Prover::new(proving_key));
         let verifier = Box::new(Verifier::new(verification_key, Curve::PASTA));

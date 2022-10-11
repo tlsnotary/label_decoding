@@ -5,29 +5,44 @@ use crate::utils::{
     bits_to_bigint, compute_zero_sum_and_deltas, encrypt_arithmetic_labels, sha256,
     u8vec_to_boolvec,
 };
-use crate::{Chunk, Delta, LabelsumHash, Plaintext, PlaintextHash, Proof, Salt, ZeroSum};
+use crate::{Chunk, Delta, LabelSumHash, Plaintext, PlaintextHash, Proof, Salt, ZeroSum};
 use crate::{ARITHMETIC_LABEL_SIZE, MAX_CHUNK_COUNT, MAX_CHUNK_SIZE};
 use aes::{Aes128, BlockDecrypt, NewBlockCipher};
-use cipher::{consts::U16, generic_array::GenericArray};
-use num::{BigUint, FromPrimitive};
+use cipher::generic_array::GenericArray;
+use num::BigUint;
 use rand::{thread_rng, Rng};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, thiserror::Error)]
 pub enum ProverError {
+    #[error("Provided empty plaintext")]
     EmptyPlaintext,
+    #[error("Unable to put the salt of the hash into one field element")]
     NoRoomForSalt,
+    #[error("Exceeded the maximum supported size of one chunk of plaintext")]
     MaxChunkSizeExceeded,
+    #[error("Exceeded the maximum supported number of chunks of plaintext")]
     MaxChunkCountExceeded,
+    #[error("Internal error: WrongFieldElementCount")]
     WrongFieldElementCount,
+    #[error("Internal error: WrongPoseidonInput")]
     WrongPoseidonInput,
-    IncorrectEncryptedLabelSize,
-    IncorrectBinaryLabelSize,
+    #[error("Provided encrypted arithmetic labels of unexpected size. Expected {0}. Got {1}.")]
+    IncorrectEncryptedLabelSize(usize, usize),
+    #[error("Provided binary labels of unexpected size. Expected {0}. Got {1}.")]
+    IncorrectBinaryLabelSize(usize, usize),
+    #[error("Internal error: ErrorInPoseidonImplementation")]
     ErrorInPoseidonImplementation,
+    #[error("Cannot proceed because the binary labels were not authenticated")]
     BinaryLabelAuthenticationFailed,
+    #[error("Binary labels were not provided")]
     BinaryLabelsNotProvided,
+    #[error("Failed to authenticate the arithmetic labels")]
     ArithmeticLabelAuthenticationFailed,
+    #[error("The proof system returned an error when generating a proof")]
     ProvingBackendError,
+    #[error("Internal error: WrongLastFieldElementBitCount")]
     WrongLastFieldElementBitCount,
+    #[error("An internal error was encountered")]
     InternalError,
 }
 
@@ -36,7 +51,7 @@ pub enum ProverError {
 pub struct ProofInput {
     // Public
     pub plaintext_hash: PlaintextHash,
-    pub label_sum_hash: LabelsumHash,
+    pub label_sum_hash: LabelSumHash,
     pub sum_of_zero_labels: ZeroSum,
     pub deltas: Vec<Delta>,
 
@@ -92,13 +107,13 @@ impl State for PlaintextCommitment {}
 
 // see comments to the field's type.
 #[derive(Default)]
-pub struct LabelsumCommitment {
+pub struct LabelSumCommitment {
     plaintext: Plaintext,
     chunks: Vec<Chunk>,
     salts: Vec<Salt>,
     plaintext_hashes: Vec<PlaintextHash>,
 }
-impl State for LabelsumCommitment {}
+impl State for LabelSumCommitment {}
 
 // see comments to the field's type.
 #[derive(Default)]
@@ -107,7 +122,7 @@ pub struct BinaryLabelsAuthenticated {
     chunks: Vec<Chunk>,
     salts: Vec<Salt>,
     plaintext_hashes: Vec<PlaintextHash>,
-    labelsum_hashes: Vec<LabelsumHash>,
+    label_sum_hashes: Vec<LabelSumHash>,
     arith_label_check: ArithmeticLabelCheck,
 }
 impl State for BinaryLabelsAuthenticated {}
@@ -119,7 +134,7 @@ pub struct AuthenticateArithmeticLabels {
     chunks: Vec<Chunk>,
     salts: Vec<Salt>,
     plaintext_hashes: Vec<PlaintextHash>,
-    labelsum_hashes: Vec<LabelsumHash>,
+    label_sum_hashes: Vec<LabelSumHash>,
     arith_label_check: ArithmeticLabelCheck,
     // Garbled circuit's output labels. We call them "binary" to distinguish
     // them from the arithmetic labels.
@@ -133,24 +148,14 @@ pub struct ProofCreation {
     chunks: Vec<Chunk>,
     salts: Vec<Salt>,
     plaintext_hashes: Vec<PlaintextHash>,
-    labelsum_hashes: Vec<LabelsumHash>,
+    label_sum_hashes: Vec<LabelSumHash>,
     deltas: Vec<Delta>,
     zero_sums: Vec<ZeroSum>,
 }
 impl State for ProofCreation {}
 
-// see comments to the field's type.
-pub struct Finished {
-    plaintext: Plaintext,
-    chunks: Vec<Chunk>,
-    salts: Vec<Salt>,
-    plaintext_hashes: Vec<PlaintextHash>,
-    proofs: Vec<Proof>,
-}
-impl State for Finished {}
-
 pub trait Prove {
-    /// Given the `input` to the labelsum zk circuit, returns a serialized zk
+    /// Given the `input` to the AuthDecode zk circuit, returns a serialized zk
     /// proof which can be passed to the Verifier.
     fn prove(&self, input: ProofInput) -> Result<Proof, ProverError>;
 
@@ -178,7 +183,7 @@ pub trait Prove {
     fn hash(&self, inputs: &Vec<BigUint>) -> Result<BigUint, ProverError>;
 }
 
-pub struct LabelsumProver<S = Setup>
+pub struct AuthDecodeProver<S = Setup>
 where
     S: State,
 {
@@ -186,20 +191,20 @@ where
     state: S,
 }
 
-impl LabelsumProver {
+impl AuthDecodeProver {
     /// Returns the next expected state.
-    pub fn new(plaintext: Plaintext, prover: Box<dyn Prove>) -> LabelsumProver<Setup> {
-        LabelsumProver {
+    pub fn new(plaintext: Plaintext, prover: Box<dyn Prove>) -> AuthDecodeProver<Setup> {
+        AuthDecodeProver {
             state: Setup { plaintext },
             prover,
         }
     }
 }
 
-impl LabelsumProver<Setup> {
+impl AuthDecodeProver<Setup> {
     // Performs setup. Splits plaintext into chunks and computes a hash of each
     // chunk. Returns the next expected state.
-    pub fn setup(self) -> Result<LabelsumProver<PlaintextCommitment>, ProverError> {
+    pub fn setup(self) -> Result<AuthDecodeProver<PlaintextCommitment>, ProverError> {
         if self.state.plaintext.len() == 0 {
             return Err(ProverError::EmptyPlaintext);
         }
@@ -214,7 +219,7 @@ impl LabelsumProver<Setup> {
         }
         let (chunks, salts) = self.plaintext_to_chunks(&self.state.plaintext)?;
 
-        Ok(LabelsumProver {
+        Ok(AuthDecodeProver {
             state: PlaintextCommitment {
                 plaintext: self.state.plaintext,
                 chunks,
@@ -276,18 +281,18 @@ impl LabelsumProver<Setup> {
     }
 }
 
-impl LabelsumProver<PlaintextCommitment> {
+impl AuthDecodeProver<PlaintextCommitment> {
     /// Returns a vec of [Salt]ed Poseidon hashes for each [Chunk] and the next
     /// expected state.
     pub fn plaintext_commitment(
         self,
-    ) -> Result<(Vec<PlaintextHash>, LabelsumProver<LabelsumCommitment>), ProverError> {
+    ) -> Result<(Vec<PlaintextHash>, AuthDecodeProver<LabelSumCommitment>), ProverError> {
         let hashes = self.salt_and_hash_chunks(&self.state.chunks, &self.state.salts)?;
 
         Ok((
             hashes.clone(),
-            LabelsumProver {
-                state: LabelsumCommitment {
+            AuthDecodeProver {
+                state: LabelSumCommitment {
                     plaintext: self.state.plaintext,
                     plaintext_hashes: hashes,
                     chunks: self.state.chunks,
@@ -332,19 +337,25 @@ impl LabelsumProver<PlaintextCommitment> {
     }
 }
 
-impl LabelsumProver<LabelsumCommitment> {
+impl AuthDecodeProver<LabelSumCommitment> {
     /// Computes the sum of all arithmetic labels for each chunk of plaintext.
     /// Returns the [Salt]ed hash of each sum and the next expected state.
-    pub fn labelsum_commitment(
+    pub fn label_sum_commitment(
         self,
         ciphertexts: Vec<[[u8; 16]; 2]>,
         labels: &Vec<u128>,
-    ) -> Result<(Vec<LabelsumHash>, LabelsumProver<BinaryLabelsAuthenticated>), ProverError> {
+    ) -> Result<
+        (
+            Vec<LabelSumHash>,
+            AuthDecodeProver<BinaryLabelsAuthenticated>,
+        ),
+        ProverError,
+    > {
         let sums = self.compute_label_sums(&ciphertexts, labels)?;
 
         let arith_label_check = ArithmeticLabelCheck::new(&ciphertexts);
 
-        let res: Result<Vec<LabelsumHash>, ProverError> = sums
+        let res: Result<Vec<LabelSumHash>, ProverError> = sums
             .iter()
             .zip(self.state.salts.iter())
             .map(|(sum, salt)| {
@@ -360,15 +371,15 @@ impl LabelsumProver<LabelsumCommitment> {
         if res.is_err() {
             return Err(res.err().unwrap());
         }
-        let labelsum_hashes = res.unwrap();
+        let label_sum_hashes = res.unwrap();
 
         Ok((
-            labelsum_hashes.clone(),
-            LabelsumProver {
+            label_sum_hashes.clone(),
+            AuthDecodeProver {
                 state: BinaryLabelsAuthenticated {
                     plaintext: self.state.plaintext,
                     chunks: self.state.chunks,
-                    labelsum_hashes,
+                    label_sum_hashes,
                     plaintext_hashes: self.state.plaintext_hashes,
                     salts: self.state.salts,
                     arith_label_check,
@@ -387,10 +398,16 @@ impl LabelsumProver<LabelsumCommitment> {
         binary_labels: &Vec<u128>,
     ) -> Result<Vec<BigUint>, ProverError> {
         if ciphertexts.len() != self.state.plaintext.len() * 8 {
-            return Err(ProverError::IncorrectEncryptedLabelSize);
+            return Err(ProverError::IncorrectEncryptedLabelSize(
+                self.state.plaintext.len(),
+                ciphertexts.len(),
+            ));
         }
         if binary_labels.len() != self.state.plaintext.len() * 8 {
-            return Err(ProverError::IncorrectBinaryLabelSize);
+            return Err(ProverError::IncorrectBinaryLabelSize(
+                self.state.plaintext.len(),
+                binary_labels.len(),
+            ));
         }
 
         let res = ciphertexts
@@ -398,7 +415,7 @@ impl LabelsumProver<LabelsumCommitment> {
             .zip(binary_labels.chunks(self.prover.chunk_size()))
             .map(|(chunk_ct, chunk_lb)| {
                 // accumulate the label sum for one chunk here
-                let mut label_sum = BigUint::from_u8(0).unwrap();
+                let mut label_sum = BigUint::from(0u8);
 
                 for (ct_pair, label) in chunk_ct.iter().zip(chunk_lb) {
                     let key = Aes128::new_from_slice(&label.to_be_bytes()).unwrap();
@@ -421,7 +438,7 @@ impl LabelsumProver<LabelsumCommitment> {
     }
 }
 
-impl LabelsumProver<BinaryLabelsAuthenticated> {
+impl AuthDecodeProver<BinaryLabelsAuthenticated> {
     /// Expects a signal whether the `committed GC` protocol succesfully authenticated
     /// the output labels which we used earlier in the protocol. Returns the
     /// next expected state.
@@ -429,17 +446,17 @@ impl LabelsumProver<BinaryLabelsAuthenticated> {
         self,
         success: bool,
         all_binary_labels: Option<Vec<[u128; 2]>>,
-    ) -> Result<LabelsumProver<AuthenticateArithmeticLabels>, ProverError> {
+    ) -> Result<AuthDecodeProver<AuthenticateArithmeticLabels>, ProverError> {
         if success {
             if all_binary_labels.is_none() {
                 return Err(ProverError::BinaryLabelsNotProvided);
             }
 
-            Ok(LabelsumProver {
+            Ok(AuthDecodeProver {
                 state: AuthenticateArithmeticLabels {
                     plaintext: self.state.plaintext,
                     chunks: self.state.chunks,
-                    labelsum_hashes: self.state.labelsum_hashes,
+                    label_sum_hashes: self.state.label_sum_hashes,
                     plaintext_hashes: self.state.plaintext_hashes,
                     salts: self.state.salts,
                     arith_label_check: self.state.arith_label_check,
@@ -453,17 +470,17 @@ impl LabelsumProver<BinaryLabelsAuthenticated> {
     }
 }
 
-impl LabelsumProver<AuthenticateArithmeticLabels> {
+impl AuthDecodeProver<AuthenticateArithmeticLabels> {
     /// Authenticates the arithmetic labels which were used earlier in
-    /// [LabelsumProver<LabelsumCommitment>] by first re-generating the
+    /// [AuthDecodeProver<LabelSumCommitment>] by first re-generating the
     /// arithmetic labels from a seed and then encrypting them with binary
     /// labels. The resulting ciphertext must match the ciphertext which was
-    /// sent to us in [LabelsumProver<LabelsumCommitment>]. Returns the next
+    /// sent to us in [AuthDecodeProver<LabelSumCommitment>]. Returns the next
     ///  expected state.
     pub fn authenticate_arithmetic_labels(
         self,
         seed: Seed,
-    ) -> Result<LabelsumProver<ProofCreation>, ProverError> {
+    ) -> Result<AuthDecodeProver<ProofCreation>, ProverError> {
         let alabels = LabelGenerator::generate_from_seed(
             self.state.all_binary_labels.len(),
             ARITHMETIC_LABEL_SIZE,
@@ -494,11 +511,11 @@ impl LabelsumProver<AuthenticateArithmeticLabels> {
             })
             .collect();
 
-        Ok(LabelsumProver {
+        Ok(AuthDecodeProver {
             state: ProofCreation {
                 plaintext: self.state.plaintext,
                 chunks: self.state.chunks,
-                labelsum_hashes: self.state.labelsum_hashes,
+                label_sum_hashes: self.state.label_sum_hashes,
                 plaintext_hashes: self.state.plaintext_hashes,
                 salts: self.state.salts,
                 deltas,
@@ -509,29 +526,17 @@ impl LabelsumProver<AuthenticateArithmeticLabels> {
     }
 }
 
-impl LabelsumProver<ProofCreation> {
-    // Creates zk proofs of label decoding for each chunk of plaintext. Returns
-    // a vec of serialized proofs and the next expected state.
-    pub fn create_zk_proofs(self) -> Result<(Vec<Vec<u8>>, LabelsumProver<Finished>), ProverError> {
+impl AuthDecodeProver<ProofCreation> {
+    /// Creates zk proofs of label decoding for each chunk of plaintext.
+    /// Returns serialized proofs and salts.
+    pub fn create_zk_proofs(self) -> Result<(Vec<Proof>, Vec<Salt>), ProverError> {
         let proofs = self
             .create_zkproof_inputs(&self.state.zero_sums, self.state.deltas.clone())
             .iter()
             .map(|i| self.prover.prove(i.clone()))
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok((
-            proofs.clone(),
-            LabelsumProver {
-                state: Finished {
-                    plaintext: self.state.plaintext,
-                    chunks: self.state.chunks,
-                    plaintext_hashes: self.state.plaintext_hashes,
-                    salts: self.state.salts,
-                    proofs,
-                },
-                prover: self.prover,
-            },
-        ))
+        Ok((proofs.clone(), self.state.salts))
     }
 
     /// Returns [ProofInput]s for each [Chunk].
@@ -554,7 +559,7 @@ impl LabelsumProver<ProofCreation> {
         (0..self.state.chunks.len())
             .map(|i| ProofInput {
                 plaintext_hash: self.state.plaintext_hashes[i].clone(),
-                label_sum_hash: self.state.labelsum_hashes[i].clone(),
+                label_sum_hash: self.state.label_sum_hashes[i].clone(),
                 sum_of_zero_labels: zero_sum[i].clone(),
                 plaintext: self.state.chunks[i].clone(),
                 salt: self.state.salts[i].clone(),
@@ -566,21 +571,12 @@ impl LabelsumProver<ProofCreation> {
 
 #[cfg(test)]
 mod tests {
-    use num::{BigUint, FromPrimitive};
-    use rayon::vec;
-    use std::str::FromStr;
-
-    use super::Prove;
-    use crate::prover::AuthenticateArithmeticLabels;
-    use crate::prover::BinaryLabelsAuthenticated;
-    use crate::prover::LabelsumCommitment;
-    use crate::prover::LabelsumProver;
-    use crate::prover::PlaintextCommitment;
-    use crate::prover::ProofInput;
-    use crate::prover::ProverError;
-    use crate::prover::Setup;
-    use crate::Plaintext;
-    use crate::Proof;
+    use crate::prover::{
+        AuthDecodeProver, AuthenticateArithmeticLabels, BinaryLabelsAuthenticated,
+        LabelSumCommitment, PlaintextCommitment, ProofInput, Prove, ProverError, Setup,
+    };
+    use crate::{Plaintext, Proof};
+    use num::BigUint;
 
     /// The prover who implements `Prove` with the correct values
     struct CorrectTestProver {}
@@ -617,7 +613,7 @@ mod tests {
     #[test]
     /// Inputs empty plaintext and triggers [ProverError::EmptyPlaintext]
     fn test_error_empty_plaintext() {
-        let lsp = LabelsumProver {
+        let lsp = AuthDecodeProver {
             state: Setup { plaintext: vec![] },
             prover: Box::new(CorrectTestProver {}),
         };
@@ -660,7 +656,7 @@ mod tests {
             }
         }
 
-        let lsp = LabelsumProver {
+        let lsp = AuthDecodeProver {
             state: Setup {
                 plaintext: vec![0u8; 1],
             },
@@ -705,7 +701,7 @@ mod tests {
             }
         }
 
-        let lsp = LabelsumProver {
+        let lsp = AuthDecodeProver {
             state: Setup {
                 plaintext: vec![0u8; 1],
             },
@@ -750,7 +746,7 @@ mod tests {
             }
         }
 
-        let lsp = LabelsumProver {
+        let lsp = AuthDecodeProver {
             state: Setup {
                 plaintext: vec![0u8; 1],
             },
@@ -764,7 +760,7 @@ mod tests {
     #[test]
     /// Inputs too much plaintext and triggers [ProverError::MaxChunkCountExceeded]
     fn test_error_max_chunk_count_exceeded() {
-        let lsp = LabelsumProver {
+        let lsp = AuthDecodeProver {
             state: Setup {
                 plaintext: vec![0u8; 1000000],
             },
@@ -809,7 +805,7 @@ mod tests {
             }
         }
 
-        let lsp = LabelsumProver::new(Plaintext::default(), Box::new(TestProver {}));
+        let lsp = AuthDecodeProver::new(Plaintext::default(), Box::new(TestProver {}));
         let res = lsp.prover.hash(&[BigUint::default()].to_vec());
 
         assert_eq!(
@@ -824,13 +820,16 @@ mod tests {
         let ciphertexts = vec![[[0u8; 16], [0u8; 16]]];
         let labels = vec![0u128];
 
-        let lsp = LabelsumProver {
-            state: LabelsumCommitment::default(),
+        let lsp = AuthDecodeProver {
+            state: LabelSumCommitment::default(),
             prover: Box::new(CorrectTestProver {}),
         };
-        let res = lsp.labelsum_commitment(ciphertexts, &labels);
+        let res = lsp.label_sum_commitment(ciphertexts, &labels);
 
-        assert_eq!(res.err().unwrap(), ProverError::IncorrectEncryptedLabelSize);
+        assert_eq!(
+            res.err().unwrap(),
+            ProverError::IncorrectEncryptedLabelSize(0, 1)
+        );
     }
 
     #[test]
@@ -840,22 +839,25 @@ mod tests {
         let ciphertexts = vec![[[0u8; 16], [0u8; 16]]; pt_len * 8];
         let labels = vec![0u128];
 
-        let lsp = LabelsumProver {
-            state: LabelsumCommitment {
+        let lsp = AuthDecodeProver {
+            state: LabelSumCommitment {
                 plaintext: vec![0u8; pt_len],
                 ..Default::default()
             },
             prover: Box::new(CorrectTestProver {}),
         };
-        let res = lsp.labelsum_commitment(ciphertexts, &labels);
+        let res = lsp.label_sum_commitment(ciphertexts, &labels);
 
-        assert_eq!(res.err().unwrap(), ProverError::IncorrectBinaryLabelSize);
+        assert_eq!(
+            res.err().unwrap(),
+            ProverError::IncorrectBinaryLabelSize(pt_len, 1)
+        );
     }
 
     #[test]
     /// Doesn't provide binary labels and triggers [ProverError::BinaryLabelsNotProvided]
     fn test_error_binary_labels_not_provided() {
-        let lsp = LabelsumProver {
+        let lsp = AuthDecodeProver {
             state: BinaryLabelsAuthenticated::default(),
             prover: Box::new(CorrectTestProver {}),
         };
@@ -867,7 +869,7 @@ mod tests {
     #[test]
     /// Receives a `false` signal and triggers [ProverError::BinaryLabelAuthenticationFailed]
     fn test_error_binary_label_authentication_failed() {
-        let lsp = LabelsumProver {
+        let lsp = AuthDecodeProver {
             state: BinaryLabelsAuthenticated::default(),
             prover: Box::new(CorrectTestProver {}),
         };
@@ -882,7 +884,7 @@ mod tests {
     #[test]
     /// Provides the wrong seed and triggers [ProverError::ArithmeticLabelAuthenticationFailed]
     fn test_error_arithmetic_label_authentication_failed() {
-        let lsp = LabelsumProver {
+        let lsp = AuthDecodeProver {
             state: AuthenticateArithmeticLabels::default(),
             prover: Box::new(CorrectTestProver {}),
         };
@@ -928,16 +930,16 @@ mod tests {
             }
         }
 
-        let lsp = LabelsumProver::new(Plaintext::default(), Box::new(TestProver {}));
+        let lsp = AuthDecodeProver::new(Plaintext::default(), Box::new(TestProver {}));
         let res = lsp.prover.prove(ProofInput::default());
 
         assert_eq!(res.err().unwrap(), ProverError::ProvingBackendError);
     }
 
     #[test]
-    /// Tests LabelsumProver<Setup>::plaintext_to_chunks()
+    /// Tests AuthDecodeProver<Setup>::plaintext_to_chunks()
     fn test_plaintext_to_chunks() {
-        let lsp = LabelsumProver {
+        let lsp = AuthDecodeProver {
             state: Setup::default(),
             prover: Box::new(CorrectTestProver {}),
         };
@@ -961,9 +963,9 @@ mod tests {
     }
 
     #[test]
-    /// Tests LabelsumProver<PlaintextCommitment>::salt_chunk()
+    /// Tests AuthDecodeProver<PlaintextCommitment>::salt_chunk()
     fn test_salt_chunk() {
-        let lsp = LabelsumProver {
+        let lsp = AuthDecodeProver {
             state: PlaintextCommitment::default(),
             prover: Box::new(CorrectTestProver {}),
         };

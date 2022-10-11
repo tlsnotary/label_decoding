@@ -1,6 +1,5 @@
 use halo2_proofs::{
     circuit::{AssignedCell, Layouter, Region, SimpleFloorPlanner, Value},
-    dev::{FailureLocation, MockProver, VerifyFailure},
     plonk::{
         Advice, Circuit, Column, ConstraintSystem, Constraints, Error, Expression, Instance,
         Selector,
@@ -13,11 +12,11 @@ use std::convert::TryInto;
 
 use super::poseidon::{configure_poseidon_rate_1, configure_poseidon_rate_15, Spec1, Spec15};
 use halo2_gadgets::poseidon::{primitives::ConstantLength, Hash, Pow5Chip, Pow5Config};
-use num::{BigUint, FromPrimitive};
+use num::BigUint;
 
 use super::utils::{bigint_to_256bits, bigint_to_f, bits_to_limbs, f_to_bigint};
 
-// The labelsum protocol decodes a chunk of X bits at a time.
+// The AuthDecode protocol decodes a chunk of X bits at a time.
 // Each of the bit requires 1 corresponding public input - a delta.
 // We want the deltas to use up as few instance columns as possible
 // because more instance columns means more prover time. We also want
@@ -52,7 +51,7 @@ pub const FULL_FIELD_ELEMENTS: usize = 14;
 ///
 /// TODO: Initially K was set to 6 and the whole circuit was built around
 /// 58 rows. After the circuit was built, I discovered that setting
-/// rate-15 Poseidon full rounds count to 64 produces a `NotEnoughRowsAvailable`
+/// rate-15 Poseidon partial rounds count to 64 produces a `NotEnoughRowsAvailable`
 /// error.
 ///
 /// One solution to decrease the number of used rows is to set Poseidon rate-15 partial
@@ -65,8 +64,8 @@ pub const FULL_FIELD_ELEMENTS: usize = 14;
 /// The other solution is to modify the circuit to hash 14 elements instead of 15. This
 /// will decrease the required partial rounds to 60. But that means modifying the circuit.
 ///
-/// The simplest solution was to increase the amount of available rows from 6 to 7. However,
-/// this increases the prover's time by 30%.
+/// The simplest solution was to increase the amount of available rows by increasing
+/// K. However, this increases the proof generation time by 30%.
 pub const K: u32 = 7;
 
 /// For one row of the circuit, this is the amount of advice cells to put
@@ -139,12 +138,12 @@ pub struct TopLevelConfig {
     poseidon_config_rate1: Pow5Config<Fp, 2, 1>,
 
     /// Contains 3 public input in this order:
-    /// [plaintext hash, labelsum hash, zero sum].
+    /// [plaintext hash, label sum hash, zero sum].
     /// Does **NOT** contain deltas.
     public_inputs: Column<Instance>,
 }
 
-pub struct LabelsumCircuit {
+pub struct AuthDecodeCircuit {
     /// plaintext is private input
     plaintext: [F; TOTAL_FIELD_ELEMENTS],
     /// salt is private input
@@ -157,7 +156,7 @@ pub struct LabelsumCircuit {
     deltas: [[F; CELLS_PER_ROW]; USEFUL_ROWS],
 }
 
-impl Circuit<F> for LabelsumCircuit {
+impl Circuit<F> for AuthDecodeCircuit {
     type Config = TopLevelConfig;
     type FloorPlanner = SimpleFloorPlanner;
 
@@ -170,7 +169,7 @@ impl Circuit<F> for LabelsumCircuit {
         }
     }
 
-    // Creates the circuit's columns, selectors and defines the gates.
+    /// Creates the circuit's columns, selectors and defines the gates.
     fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
         // keep this in case we modify the circuit and change K but forget
         // to update USEFUL_ROWS
@@ -266,7 +265,7 @@ impl Circuit<F> for LabelsumCircuit {
         // MISC
 
         // build Expressions containing powers of 2, to be used in some gates
-        let two = BigUint::from_u8(2).unwrap();
+        let two = BigUint::from(2u8);
         let pow_2_x: Vec<_> = (0..256)
             .map(|i| Expression::Constant(bigint_to_f(&two.pow(i as u32))))
             .collect();
@@ -372,8 +371,9 @@ impl Circuit<F> for LabelsumCircuit {
         cfg
     }
 
+    /// Creates the circuit
     fn synthesize(&self, cfg: Self::Config, mut layouter: impl Layouter<F>) -> Result<(), Error> {
-        let (labelsum, plaintext) = layouter.assign_region(
+        let (label_sum, plaintext) = layouter.assign_region(
             || "main",
             |mut region| {
                 // dot products for each row
@@ -383,9 +383,6 @@ impl Circuit<F> for LabelsumCircuit {
                 //salt
                 let assigned_salt =
                     region.assign_advice(|| "", cfg.salt, 0, || Value::known(self.salt))?;
-
-                let assigned_salt2 =
-                    region.assign_advice(|| "", cfg.salt, 1, || Value::known(self.salt))?;
 
                 for j in 0..FULL_FIELD_ELEMENTS + 1 {
                     // decompose the private field element into bits
@@ -462,8 +459,13 @@ impl Circuit<F> for LabelsumCircuit {
                 offset += 1;
 
                 // add salt
-                let label_sum_salted =
-                    self.add_salt(label_sum.clone(), assigned_salt, &mut region, &cfg, offset)?;
+                let label_sum_salted = self.add_salt(
+                    label_sum.clone(),
+                    assigned_salt.clone(),
+                    &mut region,
+                    &cfg,
+                    offset,
+                )?;
                 offset += 1;
 
                 // Constrains each chunks of 4 limbs to be equal to a cell and
@@ -484,7 +486,7 @@ impl Circuit<F> for LabelsumCircuit {
                 let pt_len = plaintext.len();
                 let last_with_salt = self.add_salt(
                     plaintext[pt_len - 1].clone(),
-                    assigned_salt2,
+                    assigned_salt,
                     &mut region,
                     &cfg,
                     offset,
@@ -502,7 +504,7 @@ impl Circuit<F> for LabelsumCircuit {
             },
         )?;
 
-        // Hash the labelsum and constrain the digest to match the public input
+        // Hash the label sum and constrain the digest to match the public input
 
         let chip = Pow5Chip::construct(cfg.poseidon_config_rate1.clone());
 
@@ -510,7 +512,7 @@ impl Circuit<F> for LabelsumCircuit {
             chip,
             layouter.namespace(|| "init"),
         )?;
-        let output = hasher.hash(layouter.namespace(|| "hash"), [labelsum])?;
+        let output = hasher.hash(layouter.namespace(|| "hash"), [label_sum])?;
 
         layouter.assign_region(
             || "constrain output",
@@ -535,6 +537,7 @@ impl Circuit<F> for LabelsumCircuit {
             chip,
             layouter.namespace(|| "init"),
         )?;
+        // unwrap() is safe since we use exactly 15 field elements in plaintext
         let output = hasher.hash(layouter.namespace(|| "hash"), plaintext.try_into().unwrap())?;
 
         layouter.assign_region(
@@ -556,7 +559,7 @@ impl Circuit<F> for LabelsumCircuit {
     }
 }
 
-impl LabelsumCircuit {
+impl AuthDecodeCircuit {
     pub fn new(plaintext: [F; 15], salt: F, deltas: [[F; CELLS_PER_ROW]; USEFUL_ROWS]) -> Self {
         Self {
             plaintext,
@@ -687,7 +690,7 @@ impl LabelsumCircuit {
         salt.copy_advice(|| "", region, config.scratch_space[1], row_offset)?;
 
         // compute the expected sum and put it into the 5th cell
-        let two = BigUint::from_u8(2).unwrap();
+        let two = BigUint::from(2u8);
         let pow_2_salt = bigint_to_f(&two.pow(SALT_SIZE as u32));
         let sum = cell.value() * Value::known(pow_2_salt) + salt.value();
         let assigned_sum =

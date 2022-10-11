@@ -1,15 +1,20 @@
 use super::ARITHMETIC_LABEL_SIZE;
 use crate::label::{LabelGenerator, Seed};
 use crate::utils::{compute_zero_sum_and_deltas, encrypt_arithmetic_labels, sanitize_biguint};
-use crate::{Delta, LabelsumHash, PlaintextHash, Proof, ZeroSum};
+use crate::{Delta, LabelSumHash, PlaintextHash, Proof, ZeroSum};
 use num::BigUint;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, thiserror::Error)]
 pub enum VerifierError {
-    WrongProofCount,
+    #[error("The prover has provided the wrong number of proofs. Expected {0}. Got {1}.")]
+    WrongProofCount(usize, usize),
+    #[error("The Prover has provided an input that is larger than expected")]
     BigUintTooLarge,
+    #[error("The proving system returned an error when verifying a proof")]
     VerifyingBackendError,
+    #[error("Proof verification failed")]
     VerificationFailed,
+    #[error("An internal error was encountered")]
     InternalError,
 }
 
@@ -17,7 +22,7 @@ pub enum VerifierError {
 #[derive(Default)]
 pub struct VerificationInput {
     pub plaintext_hash: PlaintextHash,
-    pub label_sum_hash: LabelsumHash,
+    pub label_sum_hash: LabelSumHash,
     pub sum_of_zero_labels: ZeroSum,
     pub deltas: Vec<Delta>,
     pub proof: Proof,
@@ -40,20 +45,20 @@ pub struct ReceivePlaintextHashes {
 impl State for ReceivePlaintextHashes {}
 
 #[derive(Default)]
-pub struct ReceiveLabelsumHashes {
+pub struct ReceiveLabelSumHashes {
     deltas: Vec<Delta>,
     zero_sums: Vec<ZeroSum>,
     plaintext_hashes: Vec<PlaintextHash>,
     arith_label_seed: Seed,
 }
-impl State for ReceiveLabelsumHashes {}
+impl State for ReceiveLabelSumHashes {}
 
 #[derive(Default)]
 pub struct VerifyMany {
     deltas: Vec<Delta>,
     zero_sums: Vec<ZeroSum>,
     plaintext_hashes: Vec<PlaintextHash>,
-    labelsum_hashes: Vec<LabelsumHash>,
+    label_sum_hashes: Vec<LabelSumHash>,
 }
 impl State for VerifyMany {}
 
@@ -80,7 +85,7 @@ pub trait Verify {
     /// of the last field element of each chunk.
     fn chunk_size(&self) -> usize;
 }
-pub struct LabelsumVerifier<S = Setup>
+pub struct AuthDecodeVerifier<S = Setup>
 where
     S: State,
 {
@@ -88,26 +93,26 @@ where
     state: S,
 }
 
-impl LabelsumVerifier {
+impl AuthDecodeVerifier {
     /// Returns the next expected state.
     pub fn new(
         binary_labels: Vec<[u128; 2]>,
         verifier: Box<dyn Verify>,
-    ) -> LabelsumVerifier<Setup> {
-        LabelsumVerifier {
+    ) -> AuthDecodeVerifier<Setup> {
+        AuthDecodeVerifier {
             state: Setup { binary_labels },
             verifier,
         }
     }
 }
 
-impl LabelsumVerifier<Setup> {
+impl AuthDecodeVerifier<Setup> {
     /// Generates arithmetic labels from a seed, computes the deltas, computes
     /// the sum of zero labels, encrypts arithmetic labels using binary
     /// labels as encryption keys.
     ///
     /// Returns the next expected state.
-    pub fn setup(self) -> Result<LabelsumVerifier<ReceivePlaintextHashes>, VerifierError> {
+    pub fn setup(self) -> Result<AuthDecodeVerifier<ReceivePlaintextHashes>, VerifierError> {
         // There will be as many deltas as there are garbled circuit output
         // labels.
         let mut deltas: Vec<BigUint> = Vec::with_capacity(self.state.binary_labels.len());
@@ -130,7 +135,7 @@ impl LabelsumVerifier<Setup> {
             Err(_) => return Err(VerifierError::InternalError),
         };
 
-        Ok(LabelsumVerifier {
+        Ok(AuthDecodeVerifier {
             state: ReceivePlaintextHashes {
                 zero_sums,
                 deltas,
@@ -142,13 +147,19 @@ impl LabelsumVerifier<Setup> {
     }
 }
 
-impl LabelsumVerifier<ReceivePlaintextHashes> {
+impl AuthDecodeVerifier<ReceivePlaintextHashes> {
     /// Receives hashes of plaintext and returns the encrypted
     /// arithmetic labels and the next expected state.
     pub fn receive_plaintext_hashes(
         self,
         plaintext_hashes: Vec<PlaintextHash>,
-    ) -> Result<(Vec<[[u8; 16]; 2]>, LabelsumVerifier<ReceiveLabelsumHashes>), VerifierError> {
+    ) -> Result<
+        (
+            Vec<[[u8; 16]; 2]>,
+            AuthDecodeVerifier<ReceiveLabelSumHashes>,
+        ),
+        VerifierError,
+    > {
         for h in &plaintext_hashes {
             if sanitize_biguint(h, self.verifier.field_size()).is_err() {
                 return Err(VerifierError::BigUintTooLarge);
@@ -157,8 +168,8 @@ impl LabelsumVerifier<ReceivePlaintextHashes> {
 
         Ok((
             self.state.ciphertexts,
-            LabelsumVerifier {
-                state: ReceiveLabelsumHashes {
+            AuthDecodeVerifier {
+                state: ReceiveLabelSumHashes {
                     zero_sums: self.state.zero_sums,
                     deltas: self.state.deltas,
                     plaintext_hashes,
@@ -170,14 +181,14 @@ impl LabelsumVerifier<ReceivePlaintextHashes> {
     }
 }
 
-impl LabelsumVerifier<ReceiveLabelsumHashes> {
+impl AuthDecodeVerifier<ReceiveLabelSumHashes> {
     /// Receives hashes of sums of labels and returns the arithmetic label [Seed]
     /// and the next expected state.
-    pub fn receive_labelsum_hashes(
+    pub fn receive_label_sum_hashes(
         self,
-        labelsum_hashes: Vec<LabelsumHash>,
-    ) -> Result<(Seed, LabelsumVerifier<VerifyMany>), VerifierError> {
-        for h in &labelsum_hashes {
+        label_sum_hashes: Vec<LabelSumHash>,
+    ) -> Result<(Seed, AuthDecodeVerifier<VerifyMany>), VerifierError> {
+        for h in &label_sum_hashes {
             if sanitize_biguint(h, self.verifier.field_size()).is_err() {
                 return Err(VerifierError::BigUintTooLarge);
             }
@@ -185,12 +196,12 @@ impl LabelsumVerifier<ReceiveLabelsumHashes> {
 
         Ok((
             self.state.arith_label_seed,
-            LabelsumVerifier {
+            AuthDecodeVerifier {
                 state: VerifyMany {
                     zero_sums: self.state.zero_sums,
                     deltas: self.state.deltas,
                     plaintext_hashes: self.state.plaintext_hashes,
-                    labelsum_hashes,
+                    label_sum_hashes,
                 },
                 verifier: self.verifier,
             },
@@ -198,13 +209,13 @@ impl LabelsumVerifier<ReceiveLabelsumHashes> {
     }
 }
 
-impl LabelsumVerifier<VerifyMany> {
+impl AuthDecodeVerifier<VerifyMany> {
     /// Verifies as many proofs as there are [Chunk]s of the plaintext. Returns
-    /// the next expected state.
+    /// the verification result and the hash of the plaintext.
     pub fn verify_many(
         mut self,
         proofs: Vec<Proof>,
-    ) -> Result<LabelsumVerifier<VerificationSuccessfull>, VerifierError> {
+    ) -> Result<(bool, Vec<PlaintextHash>), VerifierError> {
         let inputs = self.create_verification_inputs(proofs)?;
         for input in inputs {
             let res = self.verifier.verify(input)?;
@@ -215,12 +226,7 @@ impl LabelsumVerifier<VerifyMany> {
                 return Err(VerifierError::VerificationFailed);
             }
         }
-        Ok(LabelsumVerifier {
-            state: VerificationSuccessfull {
-                plaintext_hashes: self.state.plaintext_hashes,
-            },
-            verifier: self.verifier,
-        })
+        Ok((true, self.state.plaintext_hashes))
     }
 
     /// Construct public inputs for the zk circuit for each [Chunk].
@@ -235,7 +241,7 @@ impl LabelsumVerifier<VerifyMany> {
             / self.verifier.chunk_size();
 
         if proofs.len() != chunk_count {
-            return Err(VerifierError::WrongProofCount);
+            return Err(VerifierError::WrongProofCount(chunk_count, proofs.len()));
         }
 
         // Since the last chunk of plaintext is padded with zero bits, we also zero-pad
@@ -252,7 +258,7 @@ impl LabelsumVerifier<VerifyMany> {
         Ok((0..chunk_count)
             .map(|i| VerificationInput {
                 plaintext_hash: self.state.plaintext_hashes[i].clone(),
-                label_sum_hash: self.state.labelsum_hashes[i].clone(),
+                label_sum_hash: self.state.label_sum_hashes[i].clone(),
                 sum_of_zero_labels: self.state.zero_sums[i].clone(),
                 deltas: chunks_of_deltas[i].clone(),
                 proof: proofs[i].clone(),
@@ -263,8 +269,8 @@ impl LabelsumVerifier<VerifyMany> {
 
 #[cfg(test)]
 mod tests {
-    use crate::verifier::LabelsumVerifier;
-    use crate::verifier::ReceiveLabelsumHashes;
+    use crate::verifier::AuthDecodeVerifier;
+    use crate::verifier::ReceiveLabelSumHashes;
     use crate::verifier::ReceivePlaintextHashes;
     use crate::verifier::VerificationInput;
     use crate::verifier::VerifierError;
@@ -298,7 +304,7 @@ mod tests {
     ///  [VerifierError::BigUintTooLarge]
     fn test_error_biguint_too_large() {
         // test receive_plaintext_hashes()
-        let lsv = LabelsumVerifier {
+        let lsv = AuthDecodeVerifier {
             state: ReceivePlaintextHashes::default(),
             verifier: Box::new(CorrectTestVerifier {}),
         };
@@ -309,16 +315,16 @@ mod tests {
 
         assert_eq!(res.err().unwrap(), VerifierError::BigUintTooLarge);
 
-        // test receive_labelsum_hashes
-        let lsv = LabelsumVerifier {
-            state: ReceiveLabelsumHashes::default(),
+        // test receive_label_sum_hashes
+        let lsv = AuthDecodeVerifier {
+            state: ReceiveLabelSumHashes::default(),
             verifier: Box::new(CorrectTestVerifier {}),
         };
 
         let mut plaintext_hashes: Vec<BigUint> =
             (0..100).map(|i| BigUint::from(i as u64)).collect();
         plaintext_hashes[50] = BigUint::from(2u8).pow(lsv.verifier.field_size() as u32);
-        let res = lsv.receive_labelsum_hashes(plaintext_hashes);
+        let res = lsv.receive_label_sum_hashes(plaintext_hashes);
 
         assert_eq!(res.err().unwrap(), VerifierError::BigUintTooLarge);
     }
@@ -327,7 +333,7 @@ mod tests {
     /// Provide too many/too few proofs and trigger [VerifierError::WrongProofCount]
     fn test_error_wrong_proof_count() {
         // 3 chunks
-        let lsv = LabelsumVerifier {
+        let lsv = AuthDecodeVerifier {
             state: VerifyMany {
                 deltas: vec![0u8.into(); 3670 * 2 + 1],
                 ..Default::default()
@@ -337,10 +343,10 @@ mod tests {
         // 4 proofs
         let res = lsv.verify_many(vec![Proof::default(); 4]);
 
-        assert_eq!(res.err().unwrap(), VerifierError::WrongProofCount);
+        assert_eq!(res.err().unwrap(), VerifierError::WrongProofCount(3, 4));
 
         // 3 chunks
-        let lsv = LabelsumVerifier {
+        let lsv = AuthDecodeVerifier {
             state: VerifyMany {
                 deltas: vec![0u8.into(); 3670 * 2 + 1],
                 ..Default::default()
@@ -350,7 +356,7 @@ mod tests {
         // 2 proofs
         let res = lsv.verify_many(vec![Proof::default(); 2]);
 
-        assert_eq!(res.err().unwrap(), VerifierError::WrongProofCount);
+        assert_eq!(res.err().unwrap(), VerifierError::WrongProofCount(3, 2));
     }
 
     #[test]
@@ -376,12 +382,12 @@ mod tests {
             }
         }
 
-        let lsv = LabelsumVerifier {
+        let lsv = AuthDecodeVerifier {
             state: VerifyMany {
                 deltas: vec![0u8.into(); 3670 * 2 - 1],
                 zero_sums: vec![0u8.into(); 2],
                 plaintext_hashes: vec![0u8.into(); 2],
-                labelsum_hashes: vec![0u8.into(); 2],
+                label_sum_hashes: vec![0u8.into(); 2],
             },
             verifier: Box::new(TestVerifier {}),
         };
@@ -413,12 +419,12 @@ mod tests {
             }
         }
 
-        let lsv = LabelsumVerifier {
+        let lsv = AuthDecodeVerifier {
             state: VerifyMany {
                 deltas: vec![0u8.into(); 3670 * 2 - 1],
                 zero_sums: vec![0u8.into(); 2],
                 plaintext_hashes: vec![0u8.into(); 2],
-                labelsum_hashes: vec![0u8.into(); 2],
+                label_sum_hashes: vec![0u8.into(); 2],
             },
             verifier: Box::new(TestVerifier {}),
         };
