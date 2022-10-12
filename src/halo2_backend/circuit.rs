@@ -10,7 +10,8 @@ use pasta_curves::pallas;
 use pasta_curves::Fp;
 use std::convert::TryInto;
 
-use super::poseidon::{configure_poseidon_rate_1, configure_poseidon_rate_15, Spec1, Spec15};
+use super::poseidon::circuit_config::{configure_poseidon_rate_1, configure_poseidon_rate_15};
+use super::poseidon::spec::{Spec1, Spec15};
 use halo2_gadgets::poseidon::{primitives::ConstantLength, Hash, Pow5Chip, Pow5Config};
 use num::BigUint;
 

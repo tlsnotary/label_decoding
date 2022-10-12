@@ -10,10 +10,10 @@ use num::BigUint;
 
 pub mod halo2_backend;
 mod label;
-mod prover;
+pub mod prover;
 pub mod snarkjs_backend;
 mod utils;
-mod verifier;
+pub mod verifier;
 
 /// The bitsize of an arithmetic label. MUST be > 40 to give statistical
 /// security against the Prover guessing the label. For a 254-bit field,
