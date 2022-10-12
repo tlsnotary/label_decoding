@@ -1,0 +1,59 @@
+[package]
+name = "authdecode"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "authdecode"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[profile.release]
+lto = true
+
+[dependencies]
+thiserror = "1.0"
+num = { version = "0.4"}
+rand = "0.8.5"
+json = "0.12.4"
+aes = { version = "0.7.5"}
+cipher = "0.3"
+uuid = { version = "0.8.1", features = ["serde", "v4"] }
+rand_chacha = "0.3"
+sha2 = { version = "0.10.1", features = ["compress"] }
+lazy_static = "1.4.0"
+regex = "1.6.0"
+ark-bn254 = { git = "https://github.com/arkworks-rs/curves" }
+ark-ff = { git = "https://github.com/arkworks-rs/algebra" }
+# using arbitrary Poseidon rate is not possible in crates.io's version "0.3.0" of ark-sponge.
+# temporarily pulling from github
+ark-sponge = { git = "https://github.com/arkworks-rs/sponge", default-features = false }
+
+#dependencies for halo2
+halo2_proofs = { git = "https://github.com/zcash/halo2"}
+halo2_gadgets = { git = "https://github.com/zcash/halo2"}
+ff = "0.12"
+group = "0.12"
+pasta_curves = "0.4"
+getrandom = { version = "0.2", features = ["js"] }
+wasm-bindgen = { version = "0.2", features = ["serde-serialize"] }
+instant = { version = "0.1", features = [ "wasm-bindgen", "inaccurate" ] }
+rayon = "1.5"
+web-sys = { version = "0.3.56", features = ['console'] }
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+
+# force all our dependencies to also use arkworks from github
+[patch.crates-io]
+ark-std = { git = "https://github.com/arkworks-rs/std" }
+ark-ec = { git = "https://github.com/arkworks-rs/algebra" }
+ark-ff = { git = "https://github.com/arkworks-rs/algebra" }
+ark-serialize = { git = "https://github.com/arkworks-rs/algebra" }
+
+[dev-dependencies]
+hex = "0.4"
+num-bigint = { version = "0.4.3", features = ["rand"] }
+criterion = "0.3"

@@ -1,0 +1,24 @@
+This folder contains files used by the snarkjs_backend. 
+To use that backend, make sure you have node installed (tested on Node v16.17.1)
+Install dependencies with:
+
+npm install
+
+powersOfTau28_hez_final_14.ptau was downloaded from https://hermez.s3-eu-west-1.amazonaws.com/powersOfTau28_hez_final_14.ptau
+
+Whenever circuit.circom is modified, delete circuit_0000.zkey and run:
+circom circuit.circom --r1cs --wasm
+
+All the commands below will be run by the prover/verifier from the .mjs files:
+
+snarkjs groth16 setup circuit.r1cs powersOfTau28_hez_final_14.ptau circuit_0000.zkey
+snarkjs zkey contribute circuit_0000.zkey circuit_final.zkey -v -e="Notary's entropy"
+snarkjs zkey export verificationkey circuit_final.zkey verification_key.json
+snarkjs groth16 fullprove input.json circuit_js/circuit.wasm circuit_final.zkey proof.json public.json
+snarkjs groth16 verify verification_key.json public.json proof.json
+
+
+
+We can generate circuit.wasm and circuit.r1cs deterministically with circom 2.0.5+
+circom circuit.circom --r1cs --wasm
+and then ship circuit.wasm on the User side and circuit.r1cs on the Notary side
