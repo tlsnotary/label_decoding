@@ -74,7 +74,7 @@ impl Verify for Verifier {
 
     fn field_size(&self) -> usize {
         match self.curve {
-            Curve::PASTA => 255,
+            Curve::Pallas => 255,
             Curve::BN254 => 254,
             _ => panic!("a new curve was added. Add its field size here."),
         }

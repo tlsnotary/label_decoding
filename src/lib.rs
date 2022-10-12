@@ -40,6 +40,9 @@ const MAX_CHUNK_COUNT: usize = 128;
 /// the plaintext output resulting from the evaluation of a garbled circuit.
 type Plaintext = Vec<u8>;
 
+/// The size of [Plaintext] in bits.
+type PlaintextSize = usize;
+
 /// A chunk of [Plaintext]. The amount of vec elements equals
 /// [Prove::poseidon_rate] * [Prove::permutation_count]. Each vec element
 /// is an "Elliptic curve field element" into which [Prove::useful_bits] bits

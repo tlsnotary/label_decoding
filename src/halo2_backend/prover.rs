@@ -323,7 +323,7 @@ mod tests {
 
         fn field_size(&self) -> usize {
             match self.curve {
-                Curve::PASTA => 255,
+                Curve::Pallas => 255,
                 Curve::BN254 => 254,
                 _ => panic!("a new curve was added. Add its field size here."),
             }
@@ -343,7 +343,7 @@ mod tests {
     /// in [TestHalo2Prover]'s prove()
     fn test_circuit() {
         let prover = Box::new(TestHalo2Prover::new());
-        let verifier = Box::new(TestHalo2Verifier::new(Curve::PASTA));
+        let verifier = Box::new(TestHalo2Verifier::new(Curve::Pallas));
         let _res = run_until_proofs_are_generated(prover, verifier);
     }
 }

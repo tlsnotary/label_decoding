@@ -6,8 +6,8 @@ mod utils;
 pub mod verifier;
 
 /// The amount of useful bits, see [crate::prover::Prove::useful_bits].
-/// This value is hard-coded into the circuit regardless of whether we use pasta
-/// curves (field size 255) or the bn254 curve (field size 254).
+/// This value is hard-coded into the circuit regardless of whether we use the
+/// Pallas curve (field size 255) or the bn254 curve (field size 254).
 const USEFUL_BITS: usize = 253;
 
 /// The size of the chunk, see [crate::prover::Prove::chunk_size].
@@ -18,7 +18,7 @@ const CHUNK_SIZE: usize = 3670;
 
 /// The elliptic curve on which the Poseidon hash will be computed.
 pub enum Curve {
-    PASTA,
+    Pallas,
     BN254,
 }
 
@@ -42,7 +42,7 @@ mod tests {
         let verification_key = OneTimeSetup::verification_key();
 
         let prover = Box::new(Prover::new(proving_key));
-        let verifier = Box::new(Verifier::new(verification_key, Curve::PASTA));
+        let verifier = Box::new(Verifier::new(verification_key, Curve::Pallas));
         e2e_test(prover, verifier, will_corrupt_proof);
     }
 

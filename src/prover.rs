@@ -5,7 +5,9 @@ use crate::utils::{
     bits_to_bigint, compute_zero_sum_and_deltas, encrypt_arithmetic_labels, sha256,
     u8vec_to_boolvec,
 };
-use crate::{Chunk, Delta, LabelSumHash, Plaintext, PlaintextHash, Proof, Salt, ZeroSum};
+use crate::{
+    Chunk, Delta, LabelSumHash, Plaintext, PlaintextHash, PlaintextSize, Proof, Salt, ZeroSum,
+};
 use crate::{ARITHMETIC_LABEL_SIZE, MAX_CHUNK_COUNT, MAX_CHUNK_SIZE};
 use aes::{Aes128, BlockDecrypt, NewBlockCipher};
 use cipher::generic_array::GenericArray;
@@ -99,7 +101,7 @@ impl State for Setup {}
 // see comments to the field's type.
 #[derive(Default)]
 pub struct PlaintextCommitment {
-    plaintext: Plaintext,
+    plaintext_size: PlaintextSize,
     chunks: Vec<Chunk>,
     salts: Vec<Salt>,
 }
@@ -108,7 +110,7 @@ impl State for PlaintextCommitment {}
 // see comments to the field's type.
 #[derive(Default)]
 pub struct LabelSumCommitment {
-    plaintext: Plaintext,
+    plaintext_size: PlaintextSize,
     chunks: Vec<Chunk>,
     salts: Vec<Salt>,
     plaintext_hashes: Vec<PlaintextHash>,
@@ -118,7 +120,6 @@ impl State for LabelSumCommitment {}
 // see comments to the field's type.
 #[derive(Default)]
 pub struct BinaryLabelsAuthenticated {
-    plaintext: Plaintext,
     chunks: Vec<Chunk>,
     salts: Vec<Salt>,
     plaintext_hashes: Vec<PlaintextHash>,
@@ -130,7 +131,6 @@ impl State for BinaryLabelsAuthenticated {}
 // see comments to the field's type.
 #[derive(Default)]
 pub struct AuthenticateArithmeticLabels {
-    plaintext: Plaintext,
     chunks: Vec<Chunk>,
     salts: Vec<Salt>,
     plaintext_hashes: Vec<PlaintextHash>,
@@ -144,7 +144,6 @@ impl State for AuthenticateArithmeticLabels {}
 
 // see comments to the field's type.
 pub struct ProofCreation {
-    plaintext: Plaintext,
     chunks: Vec<Chunk>,
     salts: Vec<Salt>,
     plaintext_hashes: Vec<PlaintextHash>,
@@ -221,7 +220,7 @@ impl AuthDecodeProver<Setup> {
 
         Ok(AuthDecodeProver {
             state: PlaintextCommitment {
-                plaintext: self.state.plaintext,
+                plaintext_size: self.state.plaintext.len() * 8,
                 chunks,
                 salts,
             },
@@ -293,7 +292,7 @@ impl AuthDecodeProver<PlaintextCommitment> {
             hashes.clone(),
             AuthDecodeProver {
                 state: LabelSumCommitment {
-                    plaintext: self.state.plaintext,
+                    plaintext_size: self.state.plaintext_size,
                     plaintext_hashes: hashes,
                     chunks: self.state.chunks,
                     salts: self.state.salts,
@@ -377,7 +376,6 @@ impl AuthDecodeProver<LabelSumCommitment> {
             label_sum_hashes.clone(),
             AuthDecodeProver {
                 state: BinaryLabelsAuthenticated {
-                    plaintext: self.state.plaintext,
                     chunks: self.state.chunks,
                     label_sum_hashes,
                     plaintext_hashes: self.state.plaintext_hashes,
@@ -397,15 +395,15 @@ impl AuthDecodeProver<LabelSumCommitment> {
         ciphertexts: &Vec<[[u8; 16]; 2]>,
         binary_labels: &Vec<u128>,
     ) -> Result<Vec<BigUint>, ProverError> {
-        if ciphertexts.len() != self.state.plaintext.len() * 8 {
+        if ciphertexts.len() != self.state.plaintext_size {
             return Err(ProverError::IncorrectEncryptedLabelSize(
-                self.state.plaintext.len(),
+                self.state.plaintext_size,
                 ciphertexts.len(),
             ));
         }
-        if binary_labels.len() != self.state.plaintext.len() * 8 {
+        if binary_labels.len() != self.state.plaintext_size {
             return Err(ProverError::IncorrectBinaryLabelSize(
-                self.state.plaintext.len(),
+                self.state.plaintext_size,
                 binary_labels.len(),
             ));
         }
@@ -454,7 +452,6 @@ impl AuthDecodeProver<BinaryLabelsAuthenticated> {
 
             Ok(AuthDecodeProver {
                 state: AuthenticateArithmeticLabels {
-                    plaintext: self.state.plaintext,
                     chunks: self.state.chunks,
                     label_sum_hashes: self.state.label_sum_hashes,
                     plaintext_hashes: self.state.plaintext_hashes,
@@ -513,7 +510,6 @@ impl AuthDecodeProver<AuthenticateArithmeticLabels> {
 
         Ok(AuthDecodeProver {
             state: ProofCreation {
-                plaintext: self.state.plaintext,
                 chunks: self.state.chunks,
                 label_sum_hashes: self.state.label_sum_hashes,
                 plaintext_hashes: self.state.plaintext_hashes,
@@ -841,7 +837,7 @@ mod tests {
 
         let lsp = AuthDecodeProver {
             state: LabelSumCommitment {
-                plaintext: vec![0u8; pt_len],
+                plaintext_size: 0,
                 ..Default::default()
             },
             prover: Box::new(CorrectTestProver {}),
