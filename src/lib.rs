@@ -1,12 +1,14 @@
 //! This module implements the protocol for authenticated decoding (aka AuthDecode)
-//! of output labels from a garbled circuit evaluation.
-//! It assumes a privacy-free setting for the garbler, i.e. this protocol MUST ONLY
-//! start AFTER all the garbler's secret have been revealed.
+//! of output labels from a garbled circuit (GC) evaluation.
+//! The purpose of AuthDecode is to allow the GC evaluator to produce a zk-friendly
+//! hash commitment to the GC output. Computing a zk-friendly hash directly inside
+//! the GC is too expensive, hence the need for this protocol.
+//!
+//! Authdecode assumes a privacy-free setting for the garbler, i.e. the protocol
+//! MUST ONLY start AFTER the garbler reveals all his secret GC inputs.
 //! Specifically, in the context of the TLSNotary protocol, AuthDecode MUST ONLY
 //! start AFTER the Notary (who is the garbler) has revealed all of his TLS session
 //! keys' shares.
-
-use num::BigUint;
 
 pub mod halo2_backend;
 mod label;
@@ -14,6 +16,8 @@ pub mod prover;
 pub mod snarkjs_backend;
 mod utils;
 pub mod verifier;
+
+use num::BigUint;
 
 /// The bitsize of an arithmetic label. MUST be > 40 to give statistical
 /// security against the Prover guessing the label. For a 254-bit field,
