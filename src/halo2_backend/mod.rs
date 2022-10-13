@@ -47,14 +47,42 @@ mod tests {
     }
 
     #[test]
+    // As of Oct 2022 there appears to be a bug in halo2 which causes the prove
+    // times with MockProver be as long as with a real prover. Marking this test
+    // as expensive.
+    #[ignore = "expensive"]
     /// Tests that the protocol runs successfully
     fn halo2_e2e_test_success() {
-        halo2_e2e_test(false);
+        // This test causes the "thread ... has overflowed its stack" error
+        // The only way to increase the stack size is to spawn a new thread with
+        // the test.
+        // See https://github.com/rust-lang/rustfmt/issues/3473
+        use std::thread;
+        thread::Builder::new()
+            .stack_size(8388608)
+            .spawn(|| halo2_e2e_test(false))
+            .expect("Failed to create a test thread")
+            .join()
+            .expect("Failed to join a test thread");
     }
 
     #[test]
+    // As of Oct 2022 there appears to be a bug in halo2 which causes the prove
+    // times with MockProver be as long as with a real prover. Marking this test
+    // as expensive.
+    #[ignore = "expensive"]
     /// Tests that a corrupted proof causes verification to fail
     fn halo2_e2e_test_failure() {
-        halo2_e2e_test(true);
+        // This test causes the "thread ... has overflowed its stack" error
+        // The only way to increase the stack size is to spawn a new thread with
+        // the test.
+        // See https://github.com/rust-lang/rustfmt/issues/3473
+        use std::thread;
+        thread::Builder::new()
+            .stack_size(8388608)
+            .spawn(|| halo2_e2e_test(true))
+            .expect("Failed to create a test thread")
+            .join()
+            .expect("Failed to join a test thread");
     }
 }

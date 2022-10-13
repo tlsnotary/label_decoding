@@ -2,7 +2,7 @@ use super::circuit::{CELLS_PER_ROW, USEFUL_ROWS};
 use crate::utils::{boolvec_to_u8vec, u8vec_to_boolvec};
 use crate::Delta;
 use halo2_proofs::arithmetic::FieldExt;
-use num::{BigUint, FromPrimitive};
+use num::BigUint;
 use pasta_curves::Fp as F;
 
 /// Decomposes a `BigUint` into bits and returns the bits in MSB-first bit order,
@@ -86,7 +86,7 @@ fn test_f_to_bigint() {
     let b = rng.gen::<u128>();
 
     let res = f_to_bigint(&(F::from_u128(a) + F::from_u128(b)));
-    let expected: BigUint = BigUint::from_u128(a).unwrap() + BigUint::from_u128(b).unwrap();
+    let expected: BigUint = BigUint::from(a) + BigUint::from(b);
 
     assert_eq!(res, expected);
 }

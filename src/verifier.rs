@@ -62,11 +62,6 @@ pub struct VerifyMany {
 }
 impl State for VerifyMany {}
 
-pub struct VerificationSuccessfull {
-    plaintext_hashes: Vec<PlaintextHash>,
-}
-impl State for VerificationSuccessfull {}
-
 pub trait Verify {
     /// Verifies the zk proof against public `input`s. Returns `true` on success,
     /// `false` otherwise.
@@ -85,6 +80,8 @@ pub trait Verify {
     /// of the last field element of each chunk.
     fn chunk_size(&self) -> usize;
 }
+
+/// Implementation of the verifier in the AuthDecode protocol.
 pub struct AuthDecodeVerifier<S = Setup>
 where
     S: State,

@@ -182,6 +182,7 @@ pub trait Prove {
     fn hash(&self, inputs: &Vec<BigUint>) -> Result<BigUint, ProverError>;
 }
 
+/// Implementation of the prover in the AuthDecode protocol.
 pub struct AuthDecodeProver<S = Setup>
 where
     S: State,
@@ -831,13 +832,13 @@ mod tests {
     #[test]
     /// Sets too few binary labels and triggers [ProverError::IncorrectBinaryLabelSize]
     fn test_error_incorrect_binary_label_size() {
-        let pt_len = 1000;
-        let ciphertexts = vec![[[0u8; 16], [0u8; 16]]; pt_len * 8];
+        let plaintext_size = 1000;
+        let ciphertexts = vec![[[0u8; 16], [0u8; 16]]; plaintext_size];
         let labels = vec![0u128];
 
         let lsp = AuthDecodeProver {
             state: LabelSumCommitment {
-                plaintext_size: 0,
+                plaintext_size,
                 ..Default::default()
             },
             prover: Box::new(CorrectTestProver {}),
@@ -846,7 +847,7 @@ mod tests {
 
         assert_eq!(
             res.err().unwrap(),
-            ProverError::IncorrectBinaryLabelSize(pt_len, 1)
+            ProverError::IncorrectBinaryLabelSize(plaintext_size, 1)
         );
     }
 

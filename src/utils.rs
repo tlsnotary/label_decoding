@@ -1,6 +1,5 @@
 use crate::{Delta, ZeroSum};
 use aes::{Aes128, NewBlockCipher};
-use ark_ff::BigInt;
 use cipher::{consts::U16, generic_array::GenericArray, BlockEncrypt};
 use num::BigUint;
 use sha2::{Digest, Sha256};

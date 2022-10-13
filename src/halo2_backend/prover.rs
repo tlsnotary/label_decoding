@@ -7,7 +7,6 @@ use halo2_proofs::plonk;
 use halo2_proofs::plonk::ProvingKey;
 use halo2_proofs::poly::commitment::Params;
 use halo2_proofs::transcript::{Blake2bWrite, Challenge255};
-use instant::Instant;
 use num::BigUint;
 use pasta_curves::pallas::Base as F;
 use pasta_curves::EqAffine;
@@ -60,8 +59,6 @@ impl Prove for Prover {
         ];
         all_inputs.push(tmp);
 
-        let now = Instant::now();
-
         // prepare the proving system and generate the proof:
 
         let circuit =
@@ -73,6 +70,8 @@ impl Prove for Prover {
         let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
 
         let mut rng = thread_rng();
+
+        // let now = Instant::now();
 
         let res = plonk::create_proof(
             params,
@@ -86,9 +85,9 @@ impl Prove for Prover {
             return Err(ProverError::ProvingBackendError);
         }
 
-        println!("Proof created [{:?}]", now.elapsed());
+        // println!("Proof created [{:?}]", now.elapsed());
         let proof = transcript.finalize();
-        println!("Proof size [{} kB]", proof.len() as f64 / 1024.0);
+        // println!("Proof size [{} kB]", proof.len() as f64 / 1024.0);
         Ok(proof)
     }
 
@@ -154,8 +153,9 @@ fn hash_internal(inputs: &Vec<BigUint>) -> Result<BigUint, ProverError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::halo2_backend::circuit::{CELLS_PER_ROW, K, USEFUL_ROWS};
+    use crate::halo2_backend::circuit::{CELLS_PER_ROW, K};
     use crate::halo2_backend::prover::hash_internal;
+    use crate::halo2_backend::utils::bigint_to_256bits;
     use crate::halo2_backend::Curve;
     use crate::prover::{ProofInput, Prove, ProverError};
     use crate::tests::run_until_proofs_are_generated;
@@ -163,7 +163,6 @@ mod tests {
     use crate::Proof;
     use halo2_proofs::dev::MockProver;
     use num::BigUint;
-    use std::panic::catch_unwind;
 
     /// TestHalo2Prover is a test prover. It is the same as [Prover] except:
     /// - it doesn't require a proving key
@@ -207,41 +206,52 @@ mod tests {
             );
 
             // Test with the correct inputs.
+            // Expect successful verification.
 
-            println!("start mockprover");
             let prover = MockProver::run(K, &circuit, good_inputs.clone()).unwrap();
             assert!(prover.verify().is_ok());
-            println!("end mockprover");
 
-            // Corrupt at least one delta which corresponds to plaintext bit 1.
-            // Since the plaintext was chosen randomly, we corrupt only the last
-            // deltas on each row - one of those deltas will correspond to a plaintext
-            // bit 1 with high probability.
-            // Expect halo2 to panic.
-            let mut bad_input1 = good_inputs.clone();
-            for i in 0..USEFUL_ROWS {
-                bad_input1[CELLS_PER_ROW - 1][i] = F::from(123);
+            // Find one delta which corresponds to plaintext bit 1 and corrupt
+            // the delta:
+
+            // Find the first bit 1 in plaintext
+            let bits = bigint_to_256bits(input.plaintext[0].clone());
+            let mut offset: i32 = -1;
+            for (i, b) in bits.iter().enumerate() {
+                if *b == true {
+                    offset = i as i32;
+                    break;
+                }
             }
+            // first field element of the plaintext is not expected to have all
+            // bits set to zero.
+            assert!(offset != -1);
+            let offset = offset as usize;
 
-            println!("start mockprover2");
+            // Find the position of the corresponding delta. The position is
+            // row/column in the halo2 table
+            let col = offset % CELLS_PER_ROW;
+            let row = offset / CELLS_PER_ROW;
+
+            // Corrupt the delta
+            let mut bad_input1 = good_inputs.clone();
+            bad_input1[col][row] = F::from(123);
+
             let prover = MockProver::run(K, &circuit, bad_input1.clone()).unwrap();
             assert!(prover.verify().is_err());
-            println!("end mockprover2");
 
             // One-by-one corrupt the plaintext hash, the label sum hash, the zero sum.
-            // Expect halo2 to panic.
+            // Expect verification error.
 
             for i in 0..3 {
                 let mut bad_public_input = good_inputs.clone();
                 bad_public_input[CELLS_PER_ROW][i] = F::from(123);
-                println!("start mockprover3");
                 let prover = MockProver::run(K, &circuit, bad_public_input.clone()).unwrap();
                 assert!(prover.verify().is_err());
-                println!("end mockprover3");
             }
 
             // Corrupt only the plaintext.
-            // Expect halo2 to panic.
+            // Expect verification error.
 
             let mut bad_plaintext = good_plaintext.clone();
             bad_plaintext[0] = F::from(123);
@@ -250,13 +260,11 @@ mod tests {
                 bigint_to_f(&input.salt),
                 deltas_as_rows.into(),
             );
-            println!("start mockprover4");
             let prover = MockProver::run(K, &circuit, good_inputs.clone()).unwrap();
             assert!(prover.verify().is_err());
-            println!("end mockprover4");
 
             // Corrupt only the salt.
-            // Expect halo2 to panic.
+            // Expect verification error.
 
             let bad_salt = BigUint::from(123u8);
             let circuit = AuthDecodeCircuit::new(
@@ -264,10 +272,8 @@ mod tests {
                 bigint_to_f(&bad_salt),
                 deltas_as_rows.into(),
             );
-            println!("start mockprover5");
             let prover = MockProver::run(K, &circuit, good_inputs.clone()).unwrap();
             assert!(prover.verify().is_err());
-            println!("end mockprover5");
 
             Ok(Default::default())
         }
@@ -325,7 +331,6 @@ mod tests {
             match self.curve {
                 Curve::Pallas => 255,
                 Curve::BN254 => 254,
-                _ => panic!("a new curve was added. Add its field size here."),
             }
         }
 
@@ -339,11 +344,27 @@ mod tests {
     }
 
     #[test]
+    // As of Oct 2022 there appears to be a bug in halo2 which causes the prove
+    // times with MockProver be as long as with a real prover. Marking this test
+    // as expensive.
+    #[ignore = "expensive"]
     /// Tests the circuit with the correct inputs as well as wrong inputs. The logic is
     /// in [TestHalo2Prover]'s prove()
     fn test_circuit() {
-        let prover = Box::new(TestHalo2Prover::new());
-        let verifier = Box::new(TestHalo2Verifier::new(Curve::Pallas));
-        let _res = run_until_proofs_are_generated(prover, verifier);
+        // This test causes the "thread ... has overflowed its stack" error
+        // The only way to increase the stack size is to spawn a new thread with
+        // the test.
+        // See https://github.com/rust-lang/rustfmt/issues/3473
+        use std::thread;
+        thread::Builder::new()
+            .stack_size(8388608)
+            .spawn(|| {
+                let prover = Box::new(TestHalo2Prover::new());
+                let verifier = Box::new(TestHalo2Verifier::new(Curve::Pallas));
+                let _ = run_until_proofs_are_generated(prover, verifier);
+            })
+            .expect("Failed to create a test thread")
+            .join()
+            .expect("Failed to join a test thread");
     }
 }

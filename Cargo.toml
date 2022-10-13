@@ -57,3 +57,7 @@ ark-serialize = { git = "https://github.com/arkworks-rs/algebra" }
 hex = "0.4"
 num-bigint = { version = "0.4.3", features = ["rand"] }
 criterion = "0.3"
+
+[[bench]]
+name = "halo2_proof_generation"
+harness = false

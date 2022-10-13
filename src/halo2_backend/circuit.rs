@@ -492,15 +492,15 @@ impl Circuit<F> for AuthDecodeCircuit {
                     &cfg,
                     offset,
                 )?;
-                offset += 1;
+
+                // uncomment this if in the future we may want to do more
+                // computations in the scratch space
+                // offset += 1;
 
                 // replace the last field element with the one with salt
                 plaintext[pt_len - 1] = last_with_salt;
 
-                println!("{:?} final `scratch_space` offset", offset);
-
-                //Ok((label_sum, plaintext))
-
+                //println!("{:?} final `scratch_space` offset", offset);
                 Ok((label_sum_salted, plaintext))
             },
         )?;

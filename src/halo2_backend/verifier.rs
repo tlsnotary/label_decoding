@@ -7,7 +7,6 @@ use halo2_proofs::plonk::VerifyingKey;
 use halo2_proofs::poly::commitment::Params;
 use halo2_proofs::transcript::Blake2bRead;
 use halo2_proofs::transcript::Challenge255;
-use instant::Instant;
 use pasta_curves::pallas::Base as F;
 use pasta_curves::EqAffine;
 
@@ -55,7 +54,7 @@ impl Verify for Verifier {
         ];
         all_inputs.push(tmp);
 
-        let now = Instant::now();
+        // let now = Instant::now();
         // perform the actual verification
         let res = plonk::verify_proof(
             params,
@@ -64,7 +63,7 @@ impl Verify for Verifier {
             &[all_inputs.as_slice()],
             &mut transcript,
         );
-        println!("Proof verified [{:?}]", now.elapsed());
+        // println!("Proof verified [{:?}]", now.elapsed());
         if res.is_err() {
             return Err(VerifierError::VerificationFailed);
         } else {
@@ -76,7 +75,6 @@ impl Verify for Verifier {
         match self.curve {
             Curve::Pallas => 255,
             Curve::BN254 => 254,
-            _ => panic!("a new curve was added. Add its field size here."),
         }
     }
 
